@@ -120,6 +120,9 @@ class DocumentDao(private val db: SqlDb) {
     fun formatOf(id: String): Format =
         Format.fromId(db.queryOne("SELECT format FROM documents WHERE id=?", listOf(id))?.str("format"))
 
+    /** R39 维护用：全部文档 id，供孤儿扫描判定哪些镜像/资源仍有效。 */
+    fun allIds(): Set<String> = db.query("SELECT id FROM documents").map { it.str("id") }.toSet()
+
     fun exists(id: String): Boolean =
         db.queryOne("SELECT 1 AS x FROM documents WHERE id=?", listOf(id)) != null
 

@@ -1,6 +1,6 @@
 # Android 功能矩阵（§13 十项不可移植映射的落地状态）
 
-版本：0.7.25（versionCode 37）。日期：2026-11-20。R24–R36 的界面打磨、SAF 链路修复、功能增量与视觉统一均不改变 §13 十项映射的落地状态。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
+版本：0.8.2（versionCode 45）。日期：2026-11-20。R24–R44 的界面打磨、SAF 链路修复、功能增量、视觉统一、所有文件访问验证、File 直读通道铺开与维护功能复刻均不改变 §13 十项映射的落地状态。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
 来源表：移植方案 §13（已并入 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §7 存档）。证据列只写设备实测或单测可复核的事实。
 
 | # | 桌面功能 | 处置 | 替代方案 | Android 现状 | 实测证据 | 缺口归属 |

@@ -1,6 +1,6 @@
 # Android 待决项（§14 Q1–Q5）
 
-版本：0.7.25（versionCode 37）。日期：2026-11-20。R24–R36 各轮改动均不改变 Q1–Q10 的拍板结论。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
+版本：0.8.2（versionCode 45）。日期：2026-11-20。R24–R44 各轮改动均不改变 Q1–Q10 的拍板结论。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
 来源表：移植方案 §14 待决项（方案已并入 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §7 存档）。
 
 **结论：Q1–Q5 均已拍板并在 0.7.0 按所选方向落地**（用户指令「Q1–Q5 全部实现」）。下表保留原始「现状依据 / 建议 / 影响」，并在「落地状态」列写明实现口径与实测证据。

@@ -4,8 +4,10 @@ import io.github.gscratchpad.domain.model.DocState
 import io.github.gscratchpad.domain.model.Document
 import io.github.gscratchpad.domain.model.Folder
 import io.github.gscratchpad.domain.model.Format
+import io.github.gscratchpad.domain.model.MaintenanceReport
 import io.github.gscratchpad.domain.model.PurgeReport
 import io.github.gscratchpad.platform.FolderPolicy
+import io.github.gscratchpad.platform.MaintenancePolicy
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -16,6 +18,14 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 
 /** 文档仓库接口（方案 §5.2）。 */
@@ -41,6 +51,12 @@ interface DocumentRepository {
     suspend fun reorder(orderedIds: List<String>, activeId: String)
     suspend fun delete(id: String)
     suspend fun purgeClosed(keepIds: Set<String> = emptySet()): PurgeReport
+
+    /** R39：只统计不删除——应用私有 notes/ assets/ recovery/ 内无对应文档的孤儿与失效映射。 */
+    suspend fun scanOrphans(): MaintenanceReport
+
+    /** R39：清理孤儿文件 + 失效映射，可选 VACUUM 回收空闲页。不触碰关联的本机原文件。 */
+    suspend fun maintain(vacuum: Boolean = true): MaintenanceReport
     suspend fun submitSave(id: String, content: String, revision: Long): SaveQueue.SaveTicket
 
     /** 编辑路径：300 ms 防抖提交，立即返回（不阻塞输入）。 */
@@ -173,6 +189,110 @@ class DocumentRepositoryImpl(
         }
         bump()
         report
+    }
+
+    // ------------------------------------------------------------------ R39 维护
+
+    override suspend fun scanOrphans(): MaintenanceReport = withContext(io) {
+        val report = MaintenanceReport()
+        val ids = dao.allIds()
+        report.dbBytesBefore = dbFootprint()
+        report.dbBytesAfter = report.dbBytesBefore
+        runCatching {
+            val pageSize = db.queryOne("PRAGMA page_size")?.long("page_size") ?: 0L
+            val freePages = db.queryOne("PRAGMA freelist_count")?.long("freelist_count") ?: 0L
+            report.dbFreeBytes = pageSize * freePages
+        }
+        collectOrphans(ids, report, remove = false)
+        report.staleMeta = dao.staleMetaKeys(ids).size
+        report
+    }
+
+    override suspend fun maintain(vacuum: Boolean): MaintenanceReport = withContext(io) {
+        val report = MaintenanceReport()
+        val ids = dao.allIds()
+        report.dbBytesBefore = dbFootprint()
+        collectOrphans(ids, report, remove = true)
+        val stale = dao.staleMetaKeys(ids)
+        if (stale.isNotEmpty()) dao.deleteMeta(stale)
+        report.staleMeta = stale.size
+        if (vacuum) {
+            runCatching {
+                db.vacuum()
+                db.checkpointTruncate()
+            }.onSuccess { report.vacuumed = true }
+                .onFailure { report.errors.add("数据库压缩未完成：${it.message}") }
+        }
+        report.dbBytesAfter = dbFootprint()
+        report
+    }
+
+    /** 数据库实际占用 = 主库 + WAL（只看主库会把压缩前后量反，桌面同款口径）。 */
+    private fun dbFootprint(): Long =
+        paths.dbFile.length() + File(paths.dbFile.path + "-wal").length()
+
+    /** 枚举应用私有 notes/ assets/ recovery/ 第一层；符号链接按文件处理、绝不跟随。 */
+    private fun collectOrphans(ids: Set<String>, report: MaintenanceReport, remove: Boolean) {
+        val now = System.currentTimeMillis()
+        fun consider(file: File, area: MaintenancePolicy.Area, isDir: Boolean, bytes: Long) {
+            val ageMs = if (file.name.endsWith(".tmp")) now - file.lastModified() else 0L
+            if (!MaintenancePolicy.isOrphan(area, file.name, isDir, ageMs, ids)) return
+            when (area) {
+                MaintenancePolicy.Area.NOTES -> if (isDir) {
+                    report.orphanAssets += 1
+                    report.orphanAssetsBytes += bytes
+                } else {
+                    report.orphanNotes += 1
+                    report.orphanNotesBytes += bytes
+                }
+                MaintenancePolicy.Area.ASSETS -> {
+                    report.orphanAssets += 1
+                    report.orphanAssetsBytes += bytes
+                }
+                MaintenancePolicy.Area.RECOVERY -> report.orphanJournals += 1
+            }
+            if (remove) {
+                runCatching { removePath(file) }
+                    .onFailure { report.errors.add("${file.name}: ${it.message}") }
+            }
+        }
+        paths.notes.listFiles()?.forEach { f ->
+            val dir = f.isDirectory && !Files.isSymbolicLink(f.toPath())
+            consider(f, MaintenancePolicy.Area.NOTES, dir, if (dir) treeSize(f) else f.length())
+        }
+        paths.assets.listFiles()?.forEach { f ->
+            val dir = f.isDirectory && !Files.isSymbolicLink(f.toPath())
+            consider(f, MaintenancePolicy.Area.ASSETS, dir, if (dir) treeSize(f) else f.length())
+        }
+        paths.recovery.listFiles()?.forEach { f ->
+            if (f.name.endsWith(".json")) consider(f, MaintenancePolicy.Area.RECOVERY, false, 0L)
+        }
+    }
+
+    private fun treeSize(file: File): Long =
+        if (!file.isDirectory) file.length()
+        else file.walkTopDown()
+            .filter { !Files.isSymbolicLink(it.toPath()) }
+            .sumOf { if (it.isDirectory) 0L else it.length() }
+
+    /** 目录递归删除但不跟随符号链接（链接本身按文件删）。 */
+    private fun removePath(file: File) {
+        val path = file.toPath()
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(path)) return
+        if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
+                override fun visitFile(p: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    Files.deleteIfExists(p)
+                    return FileVisitResult.CONTINUE
+                }
+                override fun postVisitDirectory(p: Path, exc: IOException?): FileVisitResult {
+                    Files.deleteIfExists(p)
+                    return FileVisitResult.CONTINUE
+                }
+            })
+        } else {
+            Files.deleteIfExists(path)
+        }
     }
 
     override suspend fun submitSave(id: String, content: String, revision: Long): SaveQueue.SaveTicket {

@@ -26,7 +26,16 @@ data class TreeEntry(
     val mime: String?,
 )
 
-enum class WriteMode { ATOMIC_RENAME, IN_PLACE }
+enum class WriteMode { ATOMIC_RENAME, IN_PLACE, FILE_DIRECT }
+
+/**
+ * R38：File 直读写回能力（双轨）。由 MainActivity 注入，仅在「已授权所有文件访问」时返回 true。
+ * 单独抽成接口便于 JVM 单测时注入假实现，不依赖 Android 环境。
+ */
+fun interface FileDirectWriter {
+    /** 尝试用 File 原子写回；把 documentId 映射成真实路径后调用。成功返回 true。 */
+    suspend fun trySave(documentId: String?, text: String, style: TextStyle): Boolean
+}
 
 /**
  * SAF 文件网关（方案 §5.3）。
@@ -37,7 +46,10 @@ enum class WriteMode { ATOMIC_RENAME, IN_PLACE }
  * 3. 二进制（含 NUL）直接拒绝；
  * 4. 目录遍历在 IO 线程，单目录超过 400 项截断。
  */
-class SafFileGateway(private val context: Context) {
+class SafFileGateway(
+    private val context: Context,
+    private val fileDirectWriter: FileDirectWriter? = null,
+) {
 
     private val resolver: ContentResolver get() = context.contentResolver
 
@@ -55,6 +67,19 @@ class SafFileGateway(private val context: Context) {
     /** 写回。返回实际采用的写入模式，供迁移报告与日志。 */
     suspend fun save(uri: Uri, text: String, style: TextStyle): WriteMode =
         withContext(Dispatchers.IO) {
+            // R38 双轨：已授权且 documentId 可映射为真实路径时，优先走 File 原子写回——
+            // 不产生 .old、不受 provider 重名/删除能力限制。失败或不可用则原样回退 SAF，
+            // 保证「File 通道失败 = 退回原行为」，不会比未授权时更糟。
+            if (fileDirectWriter != null) {
+                val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
+                val resolved = FileDirectPolicy.resolvePath(documentId)
+                if (FileDirectPolicy.shouldUseFileDirect(true, true, resolved)) {
+                    val ok = runCatching { fileDirectWriter.trySave(documentId, text, style) }
+                        .getOrDefault(false)
+                    if (ok) return@withContext WriteMode.FILE_DIRECT
+                    android.util.Log.d("SafGW", "file-direct failed, fallback SAF: $documentId -> $resolved")
+                }
+            }
             val bytes = TextCodec.encode(text, style)
             // 优先尝试同目录临时文件 + 校验 + 替换；失败则原文件覆盖写。
             val renamed = runCatching { writeWithRename(uri, bytes) }.getOrDefault(false)

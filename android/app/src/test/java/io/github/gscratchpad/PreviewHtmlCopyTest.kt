@@ -52,4 +52,14 @@ class PreviewHtmlCopyTest {
         assertFalse("按钮不得用 navigator.clipboard（无 WebChromeClient 不可靠）",
             shell.contains("navigator.clipboard"))
     }
+
+    @Test
+    fun `R39 按钮锚定不滚动wrapper而非滚动容器pre内`() {
+        // 旧实现把 absolute 按钮挂在 pre（overflow:auto）内，横滚时按钮随代码跑进正文。
+        assertTrue(shell.contains(".gs-codewrap { position:relative"))
+        assertTrue(shell.contains("wrap.className = 'gs-codewrap'"))
+        assertTrue(shell.contains("wrap.appendChild(btn)"))
+        assertFalse("pre 不得再作为 position:relative 的滚动锚点",
+            shell.contains("pre { position:relative"))
+    }
 }

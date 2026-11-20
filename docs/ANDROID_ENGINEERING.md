@@ -2,13 +2,7 @@
 
 本文只写已在本机（Linux，JDK 21）实际执行过的取值与数据；早期 Windows 环境安装记录见 [archive/ANDROID_ENV_SETUP.md](archive/ANDROID_ENV_SETUP.md)。命令均在 `android/` 下执行，本地命令形态见 §1「命令执行纪律」。
 
-> 当前版本 **0.7.25（versionCode 37）**，最近一轮 R36（2026-11-20）为例行维护发版（改动细节按用户要求不记入文档）；无功能增删，全量 142 单测 / 23 套件 / 0 失败，domain 90.1%（308/342），门禁全绿、upload key 出包。上一轮 R35：长按弹出菜单 + WebDAV 对话框统一为 App 深色卡片风格（新增 `platform/PopupChrome` 线条图标与菜单项配色，三处 DropdownMenu 定制 cardBg 容器/圆角/图标，WebDAV 由原生 AlertDialog 改 Compose 对话框 + ticket 触发）；无功能增删，全量 142 单测 / 23 套件 / 0 失败，domain 90.1%（308/342），门禁全绿、upload key 出包。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
-
-## 1. 工具链（实测）
-
-| 项 | 取值 | 说明 |
-|---|---|---|
-| Gradle | 9.9.1（`gradlew` 已生成，wrapper 锁定同版本） | 方案 §12 写 Gradle 8.x；本机 AGP 9.5.1 要求 Gradle 9.x，取 9.9.1 |
+> 当前版本 **0.8.2（versionCode 45）**，最近一轮 R44（2026-11-20）：华为 YAL-AL10（Android 10）权限已授予仍列空的根修复（targetSdk≥29 分区存储强制生效，File API 对共享存储返回空 → Manifest 加 `requestLegacyExternalStorage="true"`，仅 Android 10 生效、11+ 忽略）+ 主页按钮归位改名（「从云盘或其它位置打开」移到「设置工作目录」下方；「打开本地文件夹（设为工作目录）」改名「设置工作目录」）。历轮编译失败模式已沉淀至用户级 skill `android-port-playbook` §3.1。202 单测 / 30 套件 / 0 失败，domain 95.6%（349/365），门禁全绿、upload key 出包。上一轮 R43：打开入口合并 + 文件浏览器以工作目录为根。机 AGP 9.5.1 要求 Gradle 9.x，取 9.9.1 |
 | AGP | 9.5.1 | 内置 Kotlin，禁止再 apply `org.jetbrains.kotlin.android`（会报 `Cannot add extension with name 'kotlin'`） |
 | Kotlin | 由 AGP 内置（KGP 随 AGP） | 编译任务落在 `intermediates/built_in_kotlinc/...` |
 | Compose | `org.jetbrains.kotlin.plugin.compose` 2.2.10 + `compose-bom 2025.10.01` | BOM 2026.09 需 compileSdk 37，本机只有 36 |
@@ -55,8 +49,8 @@ Hermetic 验证：release 包在 Pixel_API36 上安装、启动、进入预览�
 
 | 产物 | 体积 |
 |---|---|
-| `scratchpad-arm64-v8a-release-0.7.25.apk` | 3.29 MB（0.7.25 / versionCode 37，R36 upload key 正式签名） |
-| `scratchpad-x86_64-release-0.7.25.apk` | 3.29 MB（0.7.25 / versionCode 37，R36 upload key 正式签名） |
+| `scratchpad-arm64-v8a-release-0.8.2.apk` | 3.4 MB（0.8.2 / versionCode 45，R44 upload key 正式签名） |
+| `scratchpad-x86_64-release-0.8.2.apk` | 3.4 MB（0.8.2 / versionCode 45，R44 upload key 正式签名） |
 | `app-x86_64-debug.apk` | 12.4 MB |
 
 > R24 起 release 产物按发版规范重命名：`scratchpad-<abi>-release-<versionName>.apk`（abi ∈ arm64-v8a / x86_64）。由 `androidComponents.onVariants` 新版 Variant API 设置 `output.outputFileName`，`stageRelease` task 一站式构建+核验+汇入 `android/dist/` 并清旧包。**交付目录为 `android/dist/`**，debug 包不作交付。
@@ -211,6 +205,44 @@ R15 之前应用实际是「路线 C 的 Compose 编辑器壳 + 路线 D 的 Web
 | Material `Slider` 默认紫 | 设置页首轮滑杆是紫色圆点 + 紫轨道，与黑白灰界面冲突 | material3 默认取主题 `primary`，本工程主题未自定义 palette | `SliderDefaults.colors(thumbColor = foreground, activeTrackColor = foreground.copy(0.55f), inactiveTrackColor = foreground.copy(0.14f), activeTickColor/inactiveTickColor = Transparent)`，即 `sliderColors(foreground)` |
 | 关闭 A 立刻开 B，B 显示 A 的正文 | 点 B 进入后编辑器内容仍是 A；日志 `editor closed id=A chars=…` 之后 `mount id=B … chars=A 长度` | ① `closeEditor()` 在协程里 `flushEditor()`，读的是**实时字段** `editingDocId/editorLatest`，B 已覆盖 → A 正文写进 B；② `activate()` 无条件 `setDocument`，把 A 塞回隐藏 WebView | `editorEpoch`（开/关各 +1）+ `openEditor` 取 epoch 判失效 + `closeEditor` 先同步取快照再置 epoch + `activate()` 加 `if (editorOpen)` 守卫 |
 
+### 9.7 工作目录绑定：ColorOS 的 SAF 视图过滤与 MANAGE_EXTERNAL_STORAGE 评估（2026-11-20，验证通过待铺开）
+
+**现象**（真机 PFVM10 / OPPO Find X3 Pro，Android 12 / ColorOS `PFVM10_11_C.28`，截图 `android/tmp/01/`）：
+- 绑定工作目录时系统目录选择器中「下载 > Obsidian」只显示部分条目（`markdor`/`RebornMing`/`shell`/`untitled_2.txt` 缺失），而「Termux > obsidian」入口显示完整结构；内部存储根 `/storage/emulated/0` 进入后被系统拦为「無法使用此資料夾」，操作按钮灰掉。
+
+**根因（adb 实证，非应用 bug）**：
+- adb 直读 `/sdcard/Download/Obsidian/` 上述四项**全部真实存在** → 缺失是 ColorOS DocumentsUI 的**视图层过滤**，不是文件丢失、不是媒体文件规模问题（纯 md 的 `markdor` 同样被藏）。
+- 内部存储根被拒是 Android 11+ 平台规则（AOSP `directory_blocked_header_*`，Download 根目录本身也不可作为 tree 选中，但其子目录可选）。
+- 应用侧 `pickWorkDir` 用标准 `OpenDocumentTree()` + `launch(null)`，无 MIME 过滤，代码无过错；两个入口同一 app 结果不同即为铁证。
+
+**MANAGE_EXTERNAL_STORAGE 评估结论**（本轮只评估未改代码，未出包）：
+- **前提纠正**：Manifest 当前仅声明 `INTERNET`，存储权限开关在设置页根本不出现（"未要求任何权限"）。adb `appops set MANAGE_EXTERNAL_STORAGE allow` 读回仍 `default`，是因为应用未声明该权限而非 ColorOS 拦截。真要验证必须先改 Manifest 出包，无"零代码验证"路径。
+- **能解决的**（问题 B：覆写 `.old` 冗余 / 重名改写 / `deleteDocument` 不可用导致无法删本地文件 / 写回退化 IN_PLACE）：根源都是 SAF 把文件系统操作抽象成能力不定的 provider 接口；File API 直读回 POSIX 语义（`File.delete()`、`Files.move(REPLACE_EXISTING/ATOMIC_MOVE)`）可一并根治，比 R16 方案 A 接受 `.old` 的妥协更彻底。
+- **解决不了的**（问题 A：绑定目录时选择器看不到 Download 内容）：官方文档明示 MANAGE_EXTERNAL_STORAGE **不拓宽 SAF**（`you can only access a file/directory via SAF if you could do so without the permission`），过滤发生在 DocumentsUI，加权限后选择器仍缺项——问题 A 仍需靠引导用户改用 Termux 等入口（方案甲）绕开。
+- **代价**：权限观感重（笔记 app 申请"所有文件访问"）；不上架 Play 故无政策风险但 lint 警告仍在；SAF 链路不能推倒、File API 增量叠加成双轨制；ColorOS 放行与否须出包后在真机设置页确认 `Environment.isExternalStorageManager()` 为 true（未验证）。
+- **用户拍板「出验证版」（乙验证版）**：已在 0.7.26/38 落地——Manifest 加 `MANAGE_EXTERNAL_STORAGE`；设置页新增「验证（R37）」卡片（所有文件访问状态 + 跳转授权 + File 直读探针按钮）；`platform/AllFilesProbe` 纯函数 + 5 条单测。SAF 主链路未改，未授予时全量回退 SAF。门禁：147 单测 / 24 套件 / 0 失败、domain 90.1%、lintRelease 0 error。
+
+**真机验证结果（2026-11-20 晚，Android 14 真机，截图 `android/tmp/01/` 5 张）——验证通过**：
+- **入口找法纠正**：该权限按规范属 Special app access，在 `设置 → 应用 → 特殊应用权限 → 所有文件访问`（本 ROM 繁中名「所有檔案存取權」），**不在「存储/储存空间」页**；不能运行时弹窗申请，只能跳系统页手动开——「没弹窗」是预期。「取消存取权/取消授权」是普通 `READ/WRITE_EXTERNAL_STORAGE` 的 UI，与本权限无关。
+- **权限授予成功**：系统「所有檔案存取權」页开关已打开（蓝色）；app 设置页 R37 卡片显示「所有文件访问：已授予（File 直读可用）」→ `Environment.isExternalStorageManager()` 在 Android 14 真机上返回 true，ColorOS 放行 ✓。
+- **File 直读探针通过**：页面文案「探针通过：File 直读到 10 项，SAF 缺失的 4 项全部可见」→ `markdor`/`RebornMing`/`shell`/`untitled_2.txt` 在 File API 直读下全部可见，坐实问题②（视图层过滤）可被 File 直读绕开 ✓。
+- **SAF 选择器仍未变（预期，非失败）**：从「下载 > Obsidian」进 SAF 仍只有 6 项（缺上述 4 项），从内部存储根进仍「無法使用此資料夾」+「沒有項目」——这正是早前评估的「MANAGE_EXTERNAL_STORAGE 不拓宽 SAF」，与官方文档一致。问题 A（绑定目录时选择器缺项）依旧只能靠引导用户改用 Termux 等 provider 入口绕开。
+- **结论**：方案乙的技术前提全部坐实——权限可授予、File 直读可见全量文件。
+
+**R38 落地（用户拍板「丙」= 甲乙都做，2026-11-20，版本 0.7.27/39）**：
+- **问题 B 根治（写回链路）**：新增 `platform/FileDirectPolicy`（纯函数：documentId→真实路径映射，覆盖 `primary:`/`raw:`/SD 卡卷标/Termux 绝对路径四类，`..` 穿越与非共享存储路径拦截）+ `platform/FileGateway`（同目录临时文件 + fsync + 读回校验 + `Files.move(REPLACE_EXISTING, ATOMIC_MOVE)` 原子覆盖，全程无 `.old`）。`SafFileGateway` 构造注入 `FileDirectWriter`，`save()` 在「API≥30 + 已授权 + 路径可映射为合法共享路径」时优先 File 原子写（`WriteMode.FILE_DIRECT`），失败或不可映射原样回退 SAF——「File 通道失败 = 退回原行为」，不破坏既有链路。MainActivity 注入能力判断。open/create/listTree 仍走 SAF 不动。
+- **问题 A 引导**：绑定工作目录按钮下加提示「Android 11+ 无法选内部存储根；从『下载』进入目录不全时切到 Termux 等入口」。
+- **验证**：161 单测 / 25 套件 / 0 失败（含 FileDirectPolicy 14 条），domain 90.1%，lintRelease 0 error，两包各 3.29 MB upload key 签名。
+- **待真机复验（用户侧）**：授权后在已绑定外部文件上编辑保存，核对 logcat `FileGateway atomic-save ok` 与目录里不再新增 `.old`；若 documentId 映射失败（云盘等 provider），日志 `file-direct failed, fallback SAF` 表示自动回退，行为同升级前。
+
+**R40 落地（问题 A 根治，2026-11-20，版本 0.7.29/41）**：R38 的「引导换 Termux 入口」只是绕开，未根治 SAF 视图过滤。R40 弃用 `OpenDocumentTree` 选工作目录，改用 `MANAGE_EXTERNAL_STORAGE` 下的 [java.io.File] 逐级列举真实目录（`FileDirPicker` + `FileDirPolicy`），彻底绕开 DocumentsUI 过滤——模拟器实测目录浏览器列出共享存储根全部真实目录（Alarms/Android/DCIM/Documents/Download…），不再缺项。绑定改存真实路径（`WorkDirPolicy.Binding.path`，`savePath`，`read` 优先 path 回落旧 SAF URI，向后兼容）；path 绑定下新建走 `FileGateway.createEmptyFile`、flush 写回对 `/storage/` sourcePath 走 `FileGateway.saveAtomic`。设置页原「验证（R37）」探针卡片删除，改 STORAGE 组「存储权限（本地文件夹必需）」明确入口；主页「Android 11+ 无法直接选内部存储根」与设置页「外部文件说明」两处过时提示一并移除（File 直读后不再产生 `.old`）。**另存仍走 SAF CreateDocument**（用户主动选位置，非痛点链路），保持不动。
+
+**R42 补完（打开文件也改 File 直读，2026-11-20，版本 0.8.0/43）**：真机 db3809a6（OPPO/Android14/API34）实测 R40 的工作目录浏览器已能列全，用户反馈的「目录缺失」实际发生在主页「打开文件」——该入口仍走 SAF `OpenDocument()`，DocumentsUI 过滤未绕开。R42 用 `platform/FileOpenPicker`（复用 `FileDirPolicy.listSubdirs/listDocFiles`）替代 SAF 作主入口，逐级浏览真实目录并选文档文件；`openLocalFilePath` 读真实路径→建库→绑 `sourcePath`（写回走 FileGateway 原子写）→进编辑器。原 SAF 保留为「从云盘或其它位置打开」次入口（云盘 provider File API 看不到，必须走 SAF）。**更低版本兼容**：华为 YAL-AL10（Android 10/API29）无 MANAGE_EXTERNAL_STORAGE，原 `granted` 恒 false、授权入口守卫返回导致目录永远列不出——补 Manifest 传统 READ/WRITE（maxSdkVersion 29）+ `StorageAccess` 分版本判定 + API29- 动态申请 READ，死结解除。模拟器端到端：文件浏览器列真实目录与 .md/.txt（png 过滤、中文名正常）。
+
+**R43 补完（打开浏览器以工作目录为根，2026-11-20，版本 0.8.1/44）**：R42 的 `FileOpenPicker` 起点仍是共享存储根，绑定工作目录后打开文件仍需多步下钻。R43 改 `startPath = workDir.path ?: ROOT`，并新增 `FileDirPolicy.parentWithin(path, root)`（回到起点返回 null → UI 禁用「上级」，逐级回退不越过起点）；未绑定行为同前。同时删主页底部与「从云盘或其它位置打开」功能重合的「看不到文件？浏览全部文件」入口。pilcrow（github.com/pilcrowmd/pilcrow，纯 SAF 架构）调研结论：它没有「看不到文件/选不了」问题靠的是「OpenDocumentTree 授权 → 应用内列子文件 → 直读 document URI」，从不经过带过滤的 OpenDocument——与本项目 File 直读 + 应用内浏览器路线同构，无需再引入其机制。模拟器实测：绑定 notes 后浏览器直接落在 `/Documents/notes`、上级禁用。
+
+**R44 补完（Android 10 分区存储 legacy 标志，2026-11-20，版本 0.8.2/45）**：R42 补了 READ/WRITE_EXTERNAL_STORAGE（maxSdkVersion 29）后 YAL-AL10 实测权限已授予但两个 File 浏览器仍列空——根因是 targetSdk 36 在 Android 10 设备上分区存储强制生效，传统权限只覆盖 SAF、`File.listFiles()` 对共享存储返回空。修复：`<application android:requestLegacyExternalStorage="true">`（仅 Android 10 生效，Android 11+ 忽略、不受影响）。`aapt2 dump xmltree` 已核验标志入包；列表是否恢复需用户真机确认（若 install -r 后仍空，卸载重装一次让 legacy 授权在安装期生效）。
+
 ## 10. 复现命令
 
 ```powershell
@@ -315,8 +347,8 @@ gradle :app:assembleDebug :app:stageRelease
 #   android\dist\scratchpad-arm64-v8a-release-<versionName>.apk        （真机，交付）
 #   android\dist\scratchpad-x86_64-release-<versionName>.apk           （模拟器，交付）
 # 真机 / 模拟器安装（绝对路径，交用户自行执行）
-adb install -r android\dist\scratchpad-arm64-v8a-release-0.7.25.apk
-adb install -r android\dist\scratchpad-x86_64-release-0.7.25.apk
+adb install -r android\dist\scratchpad-arm64-v8a-release-0.8.2.apk
+adb install -r android\dist\scratchpad-x86_64-release-0.8.2.apk
 ```
 
 判据：交付时给出 `android/dist/` 下两个规范命名 release 包的绝对路径 + 体积 + badging 的 `versionCode/versionName`，并附每个 ABI 的 `adb install -r` 命令（交用户自行执行，不代替安装）。`stageRelease` 自动清理 `dist/` 旧版本包，只保留本次版本。只跑 `assembleDebug` 不算交付——真机装的是 release 包，release 包过期时看到的就是旧界面（R16 前 release 长期停留在 0.6.0）。本地无 `keystore.properties` 时签名回退 Android Debug（可安装；正式发布需 CI 注入 upload key）。

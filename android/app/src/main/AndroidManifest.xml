@@ -3,6 +3,23 @@
 
     <!-- Q5 云备份（WebDAV / 云盘目录）：需要网络访问；纯本地编辑链路不联网。 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- R37 验证版：所有文件访问（MANAGE_EXTERNAL_STORAGE）。仅用于验证 ColorOS 是否放行、
+         File API 直读能否根治 SAF 的覆写/重名/删除问题；不上架 Play，无政策风险。
+         未授予时全部逻辑回退现有 SAF 链路，不影响原有功能。 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- R42：传统存储权限（华为 YAL-AL10 等 Android 10 及以下无 MANAGE_EXTERNAL_STORAGE，
+         File 直读共享存储须靠 READ/WRITE_EXTERNAL_STORAGE）。maxSdkVersion=29 保证 API 30+
+         不申请、不触发分区存储副作用。运行时仅在 API 29- 动态申请 READ。
+         R44：targetSdk>=29 的应用在 Android 10（API 29）设备上分区存储强制生效，
+         即使授予 READ/WRITE，File API 对共享存储也列不出内容（真机 YAL-AL10 实测
+         权限已授予但浏览器全空）；requestLegacyExternalStorage 只在 Android 10 生效，
+         Android 11+ 被忽略（走 MANAGE_EXTERNAL_STORAGE），无副作用。 -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <!--
         用户自带的 WebDAV 目的地常是明文 http（局域网 Alist / NAS 默认 5244 端口）。
         Android 9+ 默认拦截 cleartext，实测会直接抛
@@ -13,6 +30,7 @@
         android:name=".GscratchpadApp"
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
+        android:requestLegacyExternalStorage="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

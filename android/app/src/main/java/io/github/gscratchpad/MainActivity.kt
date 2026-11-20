@@ -2,7 +2,10 @@ package io.github.gscratchpad
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import kotlin.coroutines.resume
 import android.text.Html
 import android.view.ViewGroup
@@ -78,6 +81,7 @@ import io.github.gscratchpad.data.MetaKeys
 import io.github.gscratchpad.domain.search.SearchOptions
 import io.github.gscratchpad.domain.search.TextSearch
 import io.github.gscratchpad.domain.model.DocState
+import io.github.gscratchpad.platform.MaintenancePolicy
 import io.github.gscratchpad.domain.model.Document
 import io.github.gscratchpad.domain.model.Folder
 import io.github.gscratchpad.domain.model.Format
@@ -104,6 +108,8 @@ class MainActivity : ComponentActivity() {
 
     private val container: AppContainer by lazy { (application as GscratchpadApp).container }
     private lateinit var gateway: SafFileGateway
+    /** R38：File 直读网关，仅在已获所有文件访问权时经 FileDirectWriter 启用。 */
+    private val fileGateway = io.github.gscratchpad.platform.FileGateway()
     private var editorHost: io.github.gscratchpad.platform.EditorHost? = null
 
     private val docs = MutableStateFlow<List<Document>>(emptyList())
@@ -157,21 +163,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** R33：选择本地文件夹绑定为工作目录。持久授权 + 记住 URI/显示名。 */
-    private val pickWorkDir = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            persistUriPermission(uri)
-            val name = gateway.displayName(uri)
-            val prefs = getSharedPreferences("editor-prefs", MODE_PRIVATE)
-            io.github.gscratchpad.platform.WorkDirPolicy.save(prefs, uri.toString(), name)
-            workDirBinding.value = io.github.gscratchpad.platform.WorkDirPolicy.read(prefs)
-            toast("已绑定工作目录：$name")
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        gateway = SafFileGateway(this)
+        // R38：注入 File 直读写回能力。仅当「API 支持 + 已授予所有文件访问 + documentId
+        // 可映射为共享存储真实路径」时生效，否则 SafFileGateway.save 原样回退 SAF。
+        gateway = SafFileGateway(
+            this,
+            fileDirectWriter = io.github.gscratchpad.platform.FileDirectWriter { documentId, text_, style ->
+                if (!allFilesAccessGranted()) return@FileDirectWriter false
+                val path = io.github.gscratchpad.platform.FileDirectPolicy.resolvePath(documentId)
+                if (!io.github.gscratchpad.platform.FileDirectPolicy.shouldUseFileDirect(true, true, path)) {
+                    return@FileDirectWriter false
+                }
+                fileGateway.saveAtomic(path!!, text_, style)
+            },
+        )
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, true)
         // 主题持久化：启动即按上次选择设置状态栏/导航栏明暗，避免"内容深色、通知栏白条"
         dark.value = getSharedPreferences("editor-prefs", MODE_PRIVATE).getBoolean("dark", false)
@@ -211,6 +217,18 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra("openPanel")?.let { pendingPanel = it }
         intent?.getStringExtra("runAction")?.let { pendingRunAction = it }
         if (intent?.getStringExtra("split") == "true") pendingSplit = true
+        // 自动化验证：am start --es openDirPicker true 直接弹出 File 目录浏览器
+        if (intent?.getStringExtra("openDirPicker") == "true") dirPickerOpen.value = true
+        // 自动化验证：am start --es openFilePicker true 直接弹出 File 本地文件浏览器（R42）
+        if (intent?.getStringExtra("openFilePicker") == "true") openFilePickerOpen.value = true
+        // R41 自动化验证：绑定指定工作目录后把「切换文档」列表 JSON 打到 logcat（VerifySwitch tag）
+        intent?.getStringExtra("verifyWorkDir")?.let { path ->
+            lifecycleScope.launch {
+                bindWorkDirPath(path)
+                reload()
+                android.util.Log.d("VerifySwitch", currentDocsJson())
+            }
+        }
         registerBackHandler()
     }
 
@@ -218,6 +236,137 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // Activity 窗口此时已 attach，decorView.windowToken 有效，可以挂 panel 子窗口
         attachEditorPanelIfNeeded()
+        // 从系统授权页返回后刷新「所有文件访问」状态（File 直读工作目录依赖此权限）
+        allFilesGranted.value = allFilesAccessGranted()
+    }
+
+    // ---- 共享存储访问辅助方法（R42：API 30+ 走 MANAGE_EXTERNAL_STORAGE，API 29- 走传统 READ）
+
+    /** 是否真正获得 File 直读能力（统一判定，兼容华为 Android 10 等低版本机）。 */
+    private fun allFilesAccessGranted(): Boolean {
+        val api = Build.VERSION.SDK_INT
+        // lint 的 NewApi 只识别同表达式内的 SDK_INT 守卫，故在此处内联而非用局部 api 变量
+        val manage = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            false
+        }
+        val legacy = android.content.pm.PackageManager.PERMISSION_GRANTED ==
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.READ_EXTERNAL_STORAGE,
+            )
+        return io.github.gscratchpad.platform.StorageAccess.canBrowse(api, manage, legacy)
+    }
+
+    /** 请求 File 直读所需的存储权限（分版本：API 30+ 跳设置页，API 29- 弹运行时权限）。 */
+    private fun requestAllFilesAccess() {
+        val api = Build.VERSION.SDK_INT
+        if (io.github.gscratchpad.platform.StorageAccess.supportsManageAll(api)) {
+            runCatching {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    ),
+                )
+            }.onFailure { toast("无法打开授权页：${it.message}") }
+        } else {
+            requestLegacyStorage.launch(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    /** API 29- 传统存储权限申请（Activity Result API）；返回后刷新 File 直读能力状态。 */
+    private val requestLegacyStorage = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        allFilesGranted.value = allFilesAccessGranted()
+        if (granted) toast("存储权限已授予，可浏览真实目录")
+        else toast("未获得存储权限，无法列出目录")
+    }
+
+    /**
+     * R40：打开工作目录浏览器。无「所有文件访问」权限时仍允许进入（对话框内给出授权入口），
+     * 因为 Android 11+ 的 ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION 需在设置页跳转。
+     */
+    private fun openWorkDirPicker() {
+        dirPickerOpen.value = true
+    }
+
+    /** R40：确认绑定 File 直读目录——写偏好、更新 StateFlow、关闭对话框。 */
+    private fun bindWorkDirPath(path: String) {
+        val prefs = getSharedPreferences("editor-prefs", MODE_PRIVATE)
+        io.github.gscratchpad.platform.WorkDirPolicy.savePath(prefs, path)
+        workDirBinding.value = io.github.gscratchpad.platform.WorkDirPolicy.read(prefs)
+        dirPickerOpen.value = false
+        toast("已绑定工作目录：${io.github.gscratchpad.platform.FileDirPolicy.label(path)}")
+    }
+
+    // ---------------------------------------------------------------- R39 维护（复刻桌面版）
+
+    /** 先扫描已关闭笔记数与正文体积供确认，不改数据。 */
+    private fun preparePurgeClosed(onReady: (String) -> Unit) {
+        lifecycleScope.launch {
+            val closed = docs.value.filter { it.state == DocState.CLOSED }
+            if (closed.isEmpty()) {
+                toast("没有已关闭的笔记")
+                return@launch
+            }
+            val bytes = closed.sumOf { it.content.toByteArray(Charsets.UTF_8).size.toLong() }
+            onReady(
+                "将从应用中移除 ${closed.size} 篇已关闭笔记的记录与图片缓存" +
+                    "（正文约 ${MaintenancePolicy.humanSize(bytes)}）。\n\n" +
+                    "本机上的原文件不会被删除，仍可重新打开；清除后这些笔记的正文将从应用中消失，无法在应用内恢复。",
+            )
+        }
+    }
+
+    private fun executePurgeClosed(onDone: (String) -> Unit) {
+        lifecycleScope.launch {
+            val report = container.repository.purgeClosed()
+            // 修复：purge 删除了 DB 记录后必须刷新主页列表，否则已清除的笔记仍留在界面上。
+            docs.value = container.dao.allDocuments()
+            if (activeId.value != null && docs.value.none { it.id == activeId.value }) {
+                docs.value.firstOrNull()?.id?.let { activate(it) }
+            }
+            val suffix = if (report.errors.isEmpty()) "" else "（${report.errors.size} 项缓存未清除）"
+            onDone("已从应用移除 ${report.purgedDocs} 篇已关闭笔记$suffix")
+        }
+    }
+
+    /** 先扫描孤儿计数与可回收空间，无可清理项直接提示、不弹确认框。 */
+    private fun prepareMaintenance(onReady: (String) -> Unit) {
+        lifecycleScope.launch {
+            val scan = container.repository.scanOrphans()
+            val items = mutableListOf<String>()
+            if (scan.orphanNotes > 0) items += "镜像文件 ${scan.orphanNotes} 个（${MaintenancePolicy.humanSize(scan.orphanNotesBytes)}）"
+            if (scan.orphanAssets > 0) items += "图片资源 ${scan.orphanAssets} 个（${MaintenancePolicy.humanSize(scan.orphanAssetsBytes)}）"
+            if (scan.orphanJournals > 0) items += "恢复日志 ${scan.orphanJournals} 个"
+            if (scan.staleMeta > 0) items += "失效映射 ${scan.staleMeta} 条"
+            val reclaimable = scan.dbFreeBytes >= 256 * 1024
+            if (items.isEmpty() && !reclaimable) {
+                toast("数据目录已无需要清理的内容")
+                return@launch
+            }
+            val sb = StringBuilder()
+            if (items.isNotEmpty()) {
+                sb.append("将删除本应用数据目录内无对应笔记的文件：\n")
+                items.forEach { sb.append("· ").append(it).append('\n') }
+            }
+            if (reclaimable) sb.append("\n数据库可回收约 ${MaintenancePolicy.humanSize(scan.dbFreeBytes)} 空闲页。")
+            sb.append("\n只处理应用私有目录，不触碰你关联的本机原文件。")
+            onReady(sb.toString())
+        }
+    }
+
+    private fun executeMaintenance(onDone: (String) -> Unit) {
+        lifecycleScope.launch {
+            val report = container.repository.maintain(vacuum = true)
+            val count = report.orphanNotes + report.orphanAssets + report.orphanJournals
+            val vacuum = if (report.vacuumed) "，数据库已压缩" else ""
+            val suffix = if (report.errors.isEmpty()) "" else "（${report.errors.size} 项失败）"
+            onDone("已清理 $count 项孤儿文件$vacuum$suffix")
+        }
     }
 
     // ---------------------------------------------------------------- 编辑器（路线 D，常驻 WebView）
@@ -267,8 +416,16 @@ class MainActivity : ComponentActivity() {
     private var previewScreen: io.github.gscratchpad.platform.PreviewScreen? = null
     private var previewOpen: Boolean = false
     private var cloudDirUri: android.net.Uri? = null
-    /** R33：当前绑定的工作目录（SAF 树），null 表示未绑定。 */
+    /** 当前绑定的工作目录（R40 File 直读路径 / 旧 SAF 树），null 表示未绑定。 */
     private val workDirBinding = MutableStateFlow<io.github.gscratchpad.platform.WorkDirPolicy.Binding?>(null)
+    /** R40：File 目录浏览器对话框是否打开。 */
+    private val dirPickerOpen = mutableStateOf(false)
+    /** R42：File 本地文件打开浏览器对话框是否打开。 */
+    private val openFilePickerOpen = mutableStateOf(false)
+
+    // ---- 共享存储访问能力（R42：API 30+ MANAGE_EXTERNAL_STORAGE / API 29- 传统 READ）
+    /** 是否已获得 File 直读能力。授权返回后（onResume / onRequestPermissionsResult）刷新。 */
+    private val allFilesGranted = mutableStateOf(false)
     /** 自动化用：am start --es split true 页面就绪后直接开双栏（窄屏也能验证）。 */
     private var pendingSplit: Boolean = false
 
@@ -355,7 +512,14 @@ class MainActivity : ComponentActivity() {
             runCatching { saveEditorPrefs(json) }
         }
         host.onAction = ::onEditorAction
-        host.onSwitchDocById = { id -> switchToDoc(id) }
+        // R41：目录里未入库的文件用 file: 虚拟 id，点选时按需导入再打开；已入库的走原切换。
+        host.onSwitchDocById = { id ->
+            if (io.github.gscratchpad.domain.WorkDirSwitchList.isVirtual(id)) {
+                openWorkDirFile(io.github.gscratchpad.domain.WorkDirSwitchList.pathOf(id))
+            } else {
+                switchToDoc(id)
+            }
+        }
         host.onJsShortcut = { name ->
             io.github.gscratchpad.domain.keys.Shortcuts.resolve(true, false, name)?.let { act ->
                 when (act) {
@@ -401,7 +565,11 @@ class MainActivity : ComponentActivity() {
         lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
         // 必须给窗口本身初始透明：addView 之后只改本地 lp 不影响已合成的窗口，panel 会从挂载起就盖住整屏
         lp.alpha = 0f
-        lp.flags = lp.flags or android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        // R42：初始就必须置 NOT_FOCUSABLE——否则主页态（透明 panel）仍持有窗口焦点，
+        // BACK 事件被送进这个子窗口、既不到 WebView 的 OnKeyListener 也不到 Activity 主窗口，
+        // 导致连按返回无法退出（真机/模拟器均复现）。showPanel 会清除该标志并 requestFocus。
+        lp.flags = lp.flags or android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         panelParams = lp
         val wm = getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager
         windowManager = wm
@@ -549,17 +717,24 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun saveExternalIfBound(id: String, content: String) {
         val sp = container.repository.getMeta(MetaKeys.sourcePath(id), null)
-        if (sp.isNullOrBlank() || !sp.startsWith("content://")) return
-        runCatching {
-            val uri = android.net.Uri.parse(sp)
-            gateway.save(
-                uri,
-                content,
-                io.github.gscratchpad.platform.TextStyle(
-                    Charsets.UTF_8, false, io.github.gscratchpad.platform.NewlineStyle.LF,
-                ),
-            )
-        }.onFailure { toast("外部文件同步失败：${it.message}") }
+        if (sp.isNullOrBlank()) return
+        val style = io.github.gscratchpad.platform.TextStyle(
+            Charsets.UTF_8, false, io.github.gscratchpad.platform.NewlineStyle.LF,
+        )
+        when {
+            // R40：File 直读路径绑定——真实路径写回，不产生 .old
+            sp.startsWith("/") -> {
+                runCatching {
+                    if (!fileGateway.saveAtomic(sp, content, style)) toast("外部文件同步失败：路径不可写")
+                }.onFailure { toast("外部文件同步失败：${it.message}") }
+            }
+            // 旧 SAF 绑定：sourcePath 是 content:// URI
+            sp.startsWith("content://") -> {
+                runCatching {
+                    gateway.save(android.net.Uri.parse(sp), content, style)
+                }.onFailure { toast("外部文件同步失败：${it.message}") }
+            }
+        }
     }
 
     private fun onEditorAction(action: String) {
@@ -740,7 +915,13 @@ class MainActivity : ComponentActivity() {
                         pushDocsToPreview()
                         previewScreen?.openDocs()
                     },
-                    onSelectDoc = { id -> switchToDoc(id) },
+                    onSelectDoc = { id ->
+                        if (io.github.gscratchpad.domain.WorkDirSwitchList.isVirtual(id)) {
+                            openWorkDirFile(io.github.gscratchpad.domain.WorkDirSwitchList.pathOf(id))
+                        } else {
+                            switchToDoc(id)
+                        }
+                    },
                 )
                 panel.addView(
                     s,
@@ -1184,6 +1365,12 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // R42：Activity 销毁前先移除 WebView Panel 子窗口，否则 WindowLeaked
+        // （返回键退出时实测到：finish 后 LinearLayout panel 仍挂在 WindowManager 上）。
+        panelContainer?.let { panel ->
+            runCatching { windowManager?.removeViewImmediate(panel) }
+        }
+        panelAdded = false
         stopSplitSync()
         previewScreen?.release()
         previewScreen = null
@@ -1212,9 +1399,10 @@ class MainActivity : ComponentActivity() {
                     closeEditor()
                     return
                 }
-                isEnabled = false
-                onBackPressedDispatcher.onBackPressed()
-                isEnabled = true
+                // 主页态（无预览、无编辑器）：直接结束 Activity 退出应用。
+                // 不再用「isEnabled=false + 二次 onBackPressed」那套——预测性返回手势下该技巧
+                // 不可靠（实测焦点已回到 MainActivity、连按返回仍不退出）。finish() 最确定。
+                finish()
             }
         })
     }
@@ -1364,12 +1552,69 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** R33：当前文档列表序列化（编辑器/预览「切换文档」浮层共用）。 */
+    /**
+     * R41：从「切换文档」浮层点选一个尚未入库的工作目录文件——按需导入并打开。
+     * 先按 sourcePath 反查是否已存在对应文档（防重复导入），未命中才读文件建文档。
+     */
+    private fun openWorkDirFile(path: String) {
+        lifecycleScope.launch {
+            // 路径安全：必须在共享存储下，且在当前绑定工作目录内
+            val dir = workDirBinding.value?.path
+            if (dir.isNullOrBlank() ||
+                !io.github.gscratchpad.platform.FileDirectPolicy.isSharedStoragePath(path) ||
+                io.github.gscratchpad.domain.WorkDirSwitchList.parentOf(path) != dir.trimEnd('/')
+            ) {
+                toast("文件不在当前工作目录内")
+                return@launch
+            }
+            // 反查已入库文档：sourcePath 精确匹配则直接切换，避免重复建文档
+            val existing = docs.value.firstOrNull { doc ->
+                container.dao.getMeta(io.github.gscratchpad.data.MetaKeys.sourcePath(doc.id), null) == path
+            }
+            if (existing != null) {
+                switchToDoc(existing.id)
+                return@launch
+            }
+            val content = fileGateway.readDocText(path)
+            if (content == null) {
+                toast("无法读取该文件（可能不是文本或已损坏）")
+                return@launch
+            }
+            val name = path.substringAfterLast('/')
+            val format = when (io.github.gscratchpad.platform.OpenPolicy.extensionOf(name)) {
+                "md", "markdown" -> Format.MD
+                "html", "htm", "xhtml" -> Format.HTML
+                else -> Format.TXT
+            }
+            val title = name.substringBeforeLast('.', name)
+            flushEditor()
+            val doc = container.repository.create(format, title)
+            container.repository.saveNow(doc.id, content, 2)
+            container.repository.setMeta(io.github.gscratchpad.data.MetaKeys.sourcePath(doc.id), path)
+            docs.value = container.dao.allDocuments()
+            openEditor(doc.id)
+            toast("已导入并打开 $name")
+        }
+    }
+
+    /**
+     * R41：当前文档列表序列化（编辑器/预览「切换文档」浮层共用）。
+     * 绑定了 File 直读工作目录时，把该目录里的文档文件也并进来（无论是否打开过）；
+     * 未入库的文件用 file: 虚拟 id，点击时由 [openWorkDirFile] 按需导入。
+     */
     private fun currentDocsJson(): String {
-        val list = docs.value
+        val all = docs.value
+        val binding = workDirBinding.value
+        val dirPath = binding?.path
+        val entries = all.map { doc ->
+            val sp = container.dao.getMeta(io.github.gscratchpad.data.MetaKeys.sourcePath(doc.id), null)
+            io.github.gscratchpad.domain.WorkDirSwitchList.DocEntry(doc.id, doc.title, sp)
+        }
+        val dirFiles = if (dirPath.isNullOrBlank()) emptyList() else fileGateway.listDocFiles(dirPath)
+        val items = io.github.gscratchpad.domain.WorkDirSwitchList.build(dirPath, entries, dirFiles)
         return io.github.gscratchpad.domain.DocListJson.serialize(
-            list.map { it.id },
-            list.map { it.title },
+            items.map { it.id },
+            items.map { it.title },
             activeId.value,
         )
     }
@@ -1401,15 +1646,29 @@ class MainActivity : ComponentActivity() {
         editorHost?.setDocument(newText)
     }
 
-    /** R33：新建文档；若绑定了工作目录，同时在该目录建同名 .md 并关联 sourcePath。 */
+    /** 新建文档；若绑定了工作目录，同时在该目录建同名 .md 并关联 sourcePath。
+     *  R40：path 绑定走 File 直读（绕开 SAF 视图过滤），旧 SAF tree 绑定保留原逻辑。 */
     private suspend fun createDocWithWorkDir(): io.github.gscratchpad.domain.model.Document {
         val doc = container.repository.create(Format.MD)
-        val tree = workDirUri()
-        if (tree != null) {
-            runCatching {
-                val created = gateway.createInTree(tree, SaveAsPolicy.fileName(doc.title), "text/markdown")
-                container.repository.setMeta(MetaKeys.sourcePath(doc.id), created.toString())
-            }.onFailure { toast("工作目录建文件失败，已建本地文档：${it.message}") }
+        val binding = workDirBinding.value
+        when {
+            binding?.path != null -> {
+                val created = fileGateway.createEmptyFile(binding.path!!, SaveAsPolicy.fileName(doc.title))
+                if (created != null) {
+                    container.repository.setMeta(MetaKeys.sourcePath(doc.id), created)
+                } else {
+                    toast("工作目录建文件失败，已建本地文档")
+                }
+            }
+            else -> {
+                val tree = workDirUri()
+                if (tree != null) {
+                    runCatching {
+                        val c = gateway.createInTree(tree, SaveAsPolicy.fileName(doc.title), "text/markdown")
+                        container.repository.setMeta(MetaKeys.sourcePath(doc.id), c.toString())
+                    }.onFailure { toast("工作目录建文件失败，已建本地文档：${it.message}") }
+                }
+            }
         }
         return doc
     }
@@ -1448,6 +1707,48 @@ class MainActivity : ComponentActivity() {
     /** R33：把绑定的工作目录字符串还原成 Uri。 */
     private fun workDirUri(): android.net.Uri? =
         workDirBinding.value?.uri?.let { runCatching { android.net.Uri.parse(it) }.getOrNull() }
+
+    /**
+     * R42：从 File 直读浏览器打开本地文件——根治 SAF「下载」入口目录过滤导致的缺项。
+     * 读真实路径正文 → 建库文档 → 绑定 sourcePath（flush 时由 FileGateway 原子写回原文件）→ 进编辑器。
+     * 复用 [openWorkDirFile] 的导入内核，只是在选文件层换成文件浏览器。
+     */
+    private fun openLocalFilePath(path: String) {
+        lifecycleScope.launch {
+            val name = path.substringAfterLast('/')
+            if (!io.github.gscratchpad.platform.OpenPolicy.isSupported(name)) {
+                toast(io.github.gscratchpad.platform.OpenPolicy.REJECT_MESSAGE)
+                return@launch
+            }
+            val text = fileGateway.readDocText(path)
+            if (text == null) {
+                toast("读取失败或文件非文本：$name")
+                return@launch
+            }
+            // 已入库的同路径文档直接打开，避免重复导入
+            val existing = docs.value.firstOrNull { doc ->
+                container.dao.getMeta(MetaKeys.sourcePath(doc.id), null) == path
+            }
+            openFilePickerOpen.value = false
+            if (existing != null) {
+                switchToDoc(existing.id)
+                return@launch
+            }
+            val format = when (io.github.gscratchpad.platform.OpenPolicy.extensionOf(name)) {
+                "md", "markdown" -> Format.MD
+                "html", "htm", "xhtml" -> Format.HTML
+                else -> Format.TXT
+            }
+            val title = name.substringBeforeLast('.', name)
+            flushEditor()
+            val doc = container.repository.create(format, title)
+            container.repository.saveNow(doc.id, text, 2)
+            container.repository.setMeta(MetaKeys.sourcePath(doc.id), path)
+            docs.value = container.dao.allDocuments()
+            openEditor(doc.id)
+            toast("已打开 $name")
+        }
+    }
 
     private fun openExternal(uri: Uri) {
         lifecycleScope.launch {
@@ -1833,6 +2134,11 @@ class MainActivity : ComponentActivity() {
         val prefs = remember { getSharedPreferences("editor-prefs", MODE_PRIVATE) }
         var settingsOpen by remember { mutableStateOf(false) }
         var showAll by remember { mutableStateOf(false) }
+        // ---- R39 维护确认对话框状态
+        var purgeConfirm by remember { mutableStateOf(false) }
+        var purgeConfirmText by remember { mutableStateOf("") }
+        var maintenanceConfirm by remember { mutableStateOf(false) }
+        var maintenanceConfirmText by remember { mutableStateOf("") }
         // ---- T3 文件夹视图状态
         var showFolders by remember { mutableStateOf(false) }
         var folderList by remember { mutableStateOf<List<Folder>>(emptyList()) }
@@ -1938,7 +2244,7 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Button(
-                            onClick = { openFile.launch(OpenPolicy.MIME_TYPES) },
+                            onClick = { openFilePickerOpen.value = true },
                             Modifier.fillMaxWidth().height(54.dp),
                             shape = RoundedCornerShape(14.dp),
                             colors = androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -1948,6 +2254,8 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text("打开文件", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                         }
+                        // R44：SAF 备用入口移到「设置工作目录」下方（用户拍板：合并后的位置在此）；
+                        // 云盘 / 其它 DocumentsProvider 仍需系统选择器（File API 看不到云盘）。
                         OutlinedButton(
                             onClick = ::newDocument,
                             Modifier.fillMaxWidth().height(50.dp),
@@ -1956,14 +2264,20 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text("新建文档", fontSize = 15.sp, color = foreground)
                         }
-                        // R33：打开本地文件夹 → 绑定为工作目录（与虚拟文件夹共存）
+                        // R40：打开本地文件夹 → File 直读浏览器逐级选择（绕开 SAF 视图过滤）；R44 改名
                         OutlinedButton(
-                            onClick = { pickWorkDir.launch(null) },
+                            onClick = ::openWorkDirPicker,
                             Modifier.fillMaxWidth().height(50.dp),
                             shape = RoundedCornerShape(14.dp),
                             border = BorderStroke(1.dp, foreground.copy(alpha = 0.26f)),
                         ) {
-                            Text("打开本地文件夹（设为工作目录）", fontSize = 14.sp, color = foreground)
+                            Text("设置工作目录", fontSize = 14.sp, color = foreground)
+                        }
+                        TextButton(
+                            onClick = { openFile.launch(OpenPolicy.MIME_TYPES) },
+                            Modifier.fillMaxWidth(),
+                        ) {
+                            Text("从云盘或其它位置打开", fontSize = 12.sp, color = muted)
                         }
                         if (workDir != null) {
                             Row(
@@ -1980,12 +2294,6 @@ class MainActivity : ComponentActivity() {
                                     Text("解绑", fontSize = 12.sp, color = muted)
                                 }
                             }
-                        }
-                        TextButton(
-                            onClick = { openFile.launch(OpenPolicy.MIME_TYPES) },
-                            modifier = Modifier.align(Alignment.CenterHorizontally),
-                        ) {
-                            Text("看不到文件？浏览全部文件", fontSize = 12.sp, color = muted)
                         }
                     }
 
@@ -2251,9 +2559,98 @@ class MainActivity : ComponentActivity() {
                                     settingsOpen = false
                                     showCloudDialog()
                                 },
+                                onPurgeClosed = {
+                                    preparePurgeClosed { text ->
+                                        purgeConfirmText = text
+                                        purgeConfirm = true
+                                    }
+                                },
+                                onMaintenance = {
+                                    prepareMaintenance { text ->
+                                        maintenanceConfirmText = text
+                                        maintenanceConfirm = true
+                                    }
+                                },
+                                storageGranted = allFilesGranted.value,
+                                onRequestStorage = ::requestAllFilesAccess,
                                 onClose = { settingsOpen = false },
                             )
                         }
+                    }
+
+                    // ---- R40：File 直读工作目录浏览器
+                    if (dirPickerOpen.value) {
+                        io.github.gscratchpad.platform.FileDirPicker(
+                            startPath = io.github.gscratchpad.platform.FileDirPolicy.ROOT,
+                            granted = allFilesGranted.value,
+                            foreground = foreground,
+                            muted = muted,
+                            background = background,
+                            cardBg = cardBg,
+                            onPick = ::bindWorkDirPath,
+                            onRequestPermission = ::requestAllFilesAccess,
+                            onDismiss = { dirPickerOpen.value = false },
+                            permissionHint = io.github.gscratchpad.platform.StorageAccess.hint(Build.VERSION.SDK_INT),
+                            permissionAction = io.github.gscratchpad.platform.StorageAccess.actionLabel(Build.VERSION.SDK_INT),
+                        )
+                    }
+
+                    // ---- R42：File 本地文件打开浏览器（绕开 SAF 视图过滤）；R43：以工作目录为根
+                    if (openFilePickerOpen.value) {
+                        io.github.gscratchpad.platform.FileOpenPicker(
+                            startPath = workDir?.path?.let { io.github.gscratchpad.platform.FileDirPolicy.normalize(it) }
+                                ?: io.github.gscratchpad.platform.FileDirPolicy.ROOT,
+                            granted = allFilesGranted.value,
+                            foreground = foreground,
+                            muted = muted,
+                            background = background,
+                            cardBg = cardBg,
+                            onPickFile = ::openLocalFilePath,
+                            onRequestPermission = ::requestAllFilesAccess,
+                            onDismiss = { openFilePickerOpen.value = false },
+                            permissionHint = io.github.gscratchpad.platform.StorageAccess.hint(Build.VERSION.SDK_INT),
+                            permissionAction = io.github.gscratchpad.platform.StorageAccess.actionLabel(Build.VERSION.SDK_INT),
+                        )
+                    }
+
+                    // ---- R39：维护确认对话框（先计数后确认，风格与 R35 一致）
+                    if (purgeConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { purgeConfirm = false },
+                            containerColor = background,
+                            title = { Text("清除已关闭的笔记？", color = foreground) },
+                            text = { Text(purgeConfirmText, fontSize = 13.sp, color = foreground) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    executePurgeClosed { msg ->
+                                        purgeConfirm = false
+                                        toast(msg)
+                                    }
+                                }) { Text("移除记录", color = foreground) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { purgeConfirm = false }) { Text("取消", color = muted) }
+                            },
+                        )
+                    }
+                    if (maintenanceConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { maintenanceConfirm = false },
+                            containerColor = background,
+                            title = { Text("清理孤儿文件并压缩数据库？", color = foreground) },
+                            text = { Text(maintenanceConfirmText, fontSize = 13.sp, color = foreground) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    executeMaintenance { msg ->
+                                        maintenanceConfirm = false
+                                        toast(msg)
+                                    }
+                                }) { Text("开始清理", color = foreground) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { maintenanceConfirm = false }) { Text("取消", color = muted) }
+                            },
+                        )
                     }
 
                     // ---- R35：WebDAV 云备份对话框（Compose，风格与重命名/删除一致）
@@ -2381,9 +2778,9 @@ class MainActivity : ComponentActivity() {
                     deleteTarget?.let { doc ->
                         AlertDialog(
                             onDismissRequest = { deleteTarget = null },
-                            title = { Text("删除文档") },
+                            title = { Text("从应用移除文档") },
                             containerColor = background,
-                            text = { Text("将永久删除「${doc.title}」及其正文，无法撤销。") },
+                            text = { Text("将从应用中移除「${doc.title}」的记录与正文缓存；本机上的原文件不会被删除，仍可重新打开。") },
                             confirmButton = {
                                 Button(onClick = {
                                     lifecycleScope.launch {
@@ -2391,9 +2788,9 @@ class MainActivity : ComponentActivity() {
                                         if (activeId.value == doc.id) activeId.value = null
                                         deleteTarget = null
                                         reload()
-                                        toast("已删除「${doc.title}」")
+                                        toast("已从应用移除「${doc.title}」")
                                     }
-                                }) { Text("删除") }
+                                }) { Text("移除") }
                             },
                             dismissButton = {
                                 Button(onClick = { deleteTarget = null }) { Text("取消") }
@@ -2555,6 +2952,10 @@ class MainActivity : ComponentActivity() {
         onImportBackup: () -> Unit,
         onExportBackup: () -> Unit,
         onCloud: () -> Unit,
+        onPurgeClosed: () -> Unit,
+        onMaintenance: () -> Unit,
+        storageGranted: Boolean,
+        onRequestStorage: () -> Unit,
         onClose: () -> Unit,
     ) {
         Surface(Modifier.fillMaxSize(), color = background) {
@@ -2729,10 +3130,26 @@ class MainActivity : ComponentActivity() {
                     SettingRow("导出备份", "打包数据库、正文与图片", foreground, muted, onExportBackup)
                     SettingDivider(foreground)
                     SettingRow("云端备份（WebDAV）", "上传 / 从云端恢复", foreground, muted, onCloud)
+                }
+
+                // R39：复刻桌面版的两个维护动作（先扫描计数、确认后才动数据目录）
+                SettingLabel("MAINTENANCE", muted)
+                SettingCard(cardBg) {
+                    SettingRow("清除已关闭的笔记", "从应用移除已关闭笔记的记录与图片缓存，原文件保留", foreground, muted, onPurgeClosed)
                     SettingDivider(foreground)
-                    // 部分 SAF provider（如 OPPO）不支持 deleteDocument：原子换名后偶发 .old 冗余备份。
-                    // 属正常现象、数据完整，用户可在系统文件管理器手动删除（方案 A：接受 + 提示）。
-                    SettingRow("外部文件说明", "保存到外部目录偶尔留下 .old 备份属正常，可手动删除", foreground, muted, null)
+                    SettingRow("清理孤儿文件并压缩数据库", "扫描无对应笔记的残留文件与失效映射", foreground, muted, onMaintenance)
+                }
+
+                // R40：工作目录走 File 直读，必须授予「所有文件访问」权限才能浏览真实目录。
+                SettingLabel("STORAGE", muted)
+                SettingCard(cardBg) {
+                    SettingRow(
+                        "存储权限（本地文件夹必需）",
+                        if (storageGranted) "已授予 · 可浏览真实目录"
+                        else "未授予 · 点此开启「${io.github.gscratchpad.platform.StorageAccess.actionLabel(Build.VERSION.SDK_INT)}」",
+                        foreground, muted,
+                        if (!storageGranted) onRequestStorage else null,
+                    )
                 }
 
                 SettingLabel("FEEDBACK", muted)

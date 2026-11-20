@@ -51,7 +51,10 @@ object PreviewHtml {
     font: ${fontSize}px/1.65 -apple-system, "Noto Sans CJK SC", "Source Han Sans", sans-serif;
     word-wrap: break-word; }
   img { max-width:100%; }
-  pre { position:relative; background:${if (dark) (if (amoled) "#0a0a0a" else "#161b22") else "#f6f8fa"}; padding:12px; overflow:auto; border-radius:6px; }
+  /* R39：Copy 按钮锚定在不滚动的 wrapper 上；pre 自己 overflow:auto 横向滚动时按钮不跟随。
+     旧实现把 absolute 按钮放进 pre（滚动容器），按钮处在滚动坐标系内，横滚时跑到代码行中间。 */
+  .gs-codewrap { position:relative; margin:1em 0; }
+  pre { position:static; margin:0; background:${if (dark) (if (amoled) "#0a0a0a" else "#161b22") else "#f6f8fa"}; padding:12px; overflow:auto; border-radius:6px; }
   code { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 0.92em; }
   /* T2 代码块 Copy 按钮：右上角、小号、跟随主题，不遮挡首行代码（pre 右侧留白） */
   .gs-copy { position:absolute; top:6px; right:6px; z-index:2;
@@ -184,7 +187,13 @@ $mermaid
           setTimeout(function(){ b.textContent = '复制'; }, 1200);
         } catch(e){}
       });
-      pre.appendChild(btn);
+      // R39：pre 是 overflow:auto 滚动容器，按钮若挂在 pre 内会随代码横滚跑进正文。
+      // 用不滚动的 wrapper 包住 pre，按钮挂 wrapper 上 → 永远固定在代码框右上角。
+      var wrap = document.createElement('div');
+      wrap.className = 'gs-codewrap';
+      if (pre.parentNode) pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(pre);
+      wrap.appendChild(btn);
     }
   }
 
