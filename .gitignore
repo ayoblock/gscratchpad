@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+
+# 本地构建产物（交付物不入库：deb → dist/，APK → android/dist/）
+dist/
+tmp/
+
+# 工作区内部数据（非项目内容）
+.workbuddy/
+
+# Android（android/.gitignore 另有细则）
+android/build/
+android/app/build/
+android/local.properties
+android/keystore.properties
+*.jks
+*.keystore
+
+# 前端依赖（node_modules 由 package-lock 复现，不入库）
+node_modules/
+
+# 编辑器 / 系统
+*.swp
+.DS_Store

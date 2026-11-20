@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Q5 云备份（WebDAV / 云盘目录）：需要网络访问；纯本地编辑链路不联网。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        用户自带的 WebDAV 目的地常是明文 http（局域网 Alist / NAS 默认 5244 端口）。
+        Android 9+ 默认拦截 cleartext，实测会直接抛
+        `Cleartext HTTP traffic to <host> not permitted`，导致上传/下载双双失败。
+        取舍：允许明文，由用户自行判断是否使用 https；不引入证书固定或代理。
+    -->
+    <application
+        android:name=".GscratchpadApp"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Gscratchpad">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 外部文件打开：text/plain 与 text/markdown（方案 §13） -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+            </intent-filter>
+
+            <!-- 分享文本：转为新建笔记（方案 §5.6） -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- capture 契约：同包显式 Intent（方案 §5.6） -->
+            <intent-filter>
+                <action android:name="io.github.gscratchpad.CAPTURE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".PreviewActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Gscratchpad" />
+    </application>
+
+</manifest>

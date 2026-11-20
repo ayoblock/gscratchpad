@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- adaptive-icon 必须放在 mipmap-anydpi-v26（AAPT 不识别无版本限定目录），
+         minSdk 已是 26，ObsoleteSdkInt 对本目录无意义。 -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="src/main/res/mipmap-anydpi-v26" />
+    </issue>
+    <!-- targetSdk 37 需要 compileSdk 37 与 compose-bom 2026.x，本机 SDK 36，按 §12 冻结 36。 -->
+    <issue id="OldTargetApi" severity="ignore" />
+    <!-- 依赖升级（AGP 9.5.1 内置 Kotlin 约束）由 CI 季度评审，不在本地告警。 -->
+    <issue id="GradleDependency" severity="ignore" />
+    <issue id="NewerVersionAvailable" severity="ignore" />
+</lint>

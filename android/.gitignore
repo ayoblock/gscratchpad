@@ -1,0 +1,9 @@
+# 正式签名密钥与配置——绝不入库
+keystore.properties
+*.jks
+*.keystore
+
+# 构建产物与本地配置
+build/
+local.properties
+.gradle/

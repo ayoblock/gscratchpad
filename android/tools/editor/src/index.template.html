@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<style>/*__CSS__*/</style>
+</head>
+<body>
+<div id="bar">
+  <button class="brand" data-act="palette" aria-label="命令面板" title="命令面板">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path d="M5 3.5h9l3 3v14h-12z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M14 3.5v3h3" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M8 12h6M8 15.5h4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+  </button>
+  <div class="grow"></div>
+  <button class="ico" data-act="docs" aria-label="切换文档" title="切换文档 (Ctrl+Tab)">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path d="M8 4.5h11M8 9h11M8 13.5h8" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M4 6h1.5M4 10.5h1.5M4 15h1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M4 19.5h11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2 2"/>
+    </svg>
+  </button>
+  <button class="ico" data-act="find" aria-label="查找" title="查找">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M14.6 14.6L19 19" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+  </button>
+  <button class="ico" data-act="outline" aria-label="大纲" title="大纲">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path d="M8 6.5h11M8 12h11M8 17.5h11" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M4.5 6.5h1M4.5 12h1M4.5 17.5h1" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+  </button>
+  <button class="ico" data-act="preview" aria-label="预览" title="预览">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path d="M2.5 12s3.8-6 9.5-6 9.5 6 9.5 6-3.8 6-9.5 6-9.5-6-9.5-6z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+  </button>
+  <button class="ico" data-act="more" aria-label="更多" title="更多">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <circle cx="12" cy="5.5" r="1.6" fill="currentColor"/>
+      <circle cx="12" cy="12" r="1.6" fill="currentColor"/>
+      <circle cx="12" cy="18.5" r="1.6" fill="currentColor"/>
+    </svg>
+  </button>
+  <button class="ico" data-act="close" aria-label="关闭" title="关闭">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="1.8"/>
+    </svg>
+  </button>
+</div>
+<div id="moremenu" hidden>
+  <button data-more="save">保存</button>
+  <button data-more="saveAs">另存为</button>
+  <button data-more="share">分享</button>
+  <button data-more="image">插入图片</button>
+  <button data-more="snippets">插入片段</button>
+  <button data-more="fold">折叠光标块</button>
+  <button data-more="foldAll">全部折叠</button>
+  <button data-more="unfoldAll">全部展开</button>
+  <button data-more="split">分屏预览</button>
+  <button data-more="settings">设置</button>
+  <button data-more="theme">日间 / 夜间</button>
+  <button data-more="cloudBackup">云备份</button>
+  <button data-more="help">快捷键帮助</button>
+  <button data-more="new">新建文档</button>
+</div>
+<div id="crumb">
+  <svg class="doc-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+    <path d="M6 3.5h8l4 4v13h-12z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    <path d="M14 3.5v4h4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+  </svg>
+  <span id="doc-title">未命名</span>
+  <span class="chev">›</span>
+  <span id="status">编辑中</span>
+</div>
+<div id="findbar" hidden>
+  <input id="findq" placeholder="查找">
+  <input id="findr" placeholder="替换为">
+  <button data-find="regex">.*</button>
+  <button data-find="selection">选区内</button>
+  <button data-find="prev">↑</button>
+  <button data-find="next">↓</button>
+  <button data-find="replace">替换</button>
+  <button data-find="all">全部</button>
+  <button data-find="close">×</button>
+</div>
+<div id="host"></div>
+<div id="help" class="overlay" hidden>
+  <div class="sheet">
+    <div class="title">快捷键</div>
+    <div class="list">
+      <div class="item">Ctrl+N<small>新建文档</small></div>
+      <div class="item">Ctrl+W<small>关闭当前文档</small></div>
+      <div class="item">Ctrl+S<small>立即保存</small></div>
+      <div class="item">Ctrl+Shift+S<small>另存为</small></div>
+      <div class="item">Ctrl+O<small>打开文件</small></div>
+      <div class="item">Ctrl+F / Ctrl+H<small>查找 / 替换</small></div>
+      <div class="item">Ctrl+Shift+I<small>命令面板</small></div>
+      <div class="item">Ctrl+Shift+O<small>文档大纲</small></div>
+      <div class="item">Ctrl+Shift+P<small>预览</small></div>
+      <div class="item">Ctrl+D / F9<small>分屏预览</small></div>
+      <div class="item">Ctrl+I<small>插入图片</small></div>
+      <div class="item">Ctrl+Tab<small>下一个文档</small></div>
+      <div class="item">Ctrl+Shift+Tab<small>上一个文档</small></div>
+      <div class="item">F1 / Ctrl+Shift+/<small>本帮助</small></div>
+      <div class="item">F2<small>重命名当前文档</small></div>
+    </div>
+    <button id="help-close" class="close">关闭</button>
+  </div>
+</div>
+<div id="palette" class="overlay" hidden>
+  <div class="sheet">
+    <input id="palette-q" placeholder="搜索命令（Ctrl+Shift+I）">
+    <div id="palette-list" class="list"></div>
+    <button id="palette-close" class="close">关闭</button>
+  </div>
+</div>
+<div id="outline" class="overlay" hidden>
+  <div class="sheet">
+    <div class="title">文档大纲</div>
+    <div id="outline-list" class="list"></div>
+    <button id="outline-close" class="close">关闭</button>
+  </div>
+</div>
+<div id="docs" class="overlay" hidden>
+  <div class="sheet">
+    <div class="title">切换文档</div>
+    <div id="docs-list" class="list"></div>
+    <button id="docs-close" class="close">关闭</button>
+  </div>
+</div>
+<div id="settings" class="overlay" hidden>
+  <div class="sheet">
+    <div class="title">设置</div>
+    <div class="field">
+      <div class="field-label">字号 <span id="set-font-size-value">15</span> px</div>
+      <input id="set-font-size" type="range" min="11" max="24" step="1" value="15">
+    </div>
+    <div class="field">
+      <div class="field-label">行高 <span id="set-line-height-value">1.2</span></div>
+      <input id="set-line-height" type="range" min="0.5" max="2.5" step="0.05" value="1.2">
+    </div>
+    <label class="field inline"><input id="set-wrap" type="checkbox" checked> 自动折行</label>
+    <button id="settings-close" class="close">完成</button>
+  </div>
+</div>
+<script>/*__JS__*/</script>
+</body>
+</html>

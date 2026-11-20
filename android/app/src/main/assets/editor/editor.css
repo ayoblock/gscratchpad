@@ -1,0 +1,231 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #ffffff;
+  overflow: hidden;
+  -webkit-text-size-adjust: 100%;
+  display: flex;
+  flex-direction: column;
+}
+body.dark { background: #1f2328; color: #e6edf3; }
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 56px;
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.22);
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+#bar .grow { flex: 1 1 auto; }
+#bar .brand,
+#bar .ico {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.9;
+}
+#bar .brand { width: 40px; }
+#bar .brand:active,
+#bar .ico:active { background: rgba(128, 128, 128, 0.18); }
+body.dark #bar .brand:active,
+body.dark #bar .ico:active { background: rgba(255, 255, 255, 0.12); }
+#bar .ico.off { opacity: 0.55; }
+
+#moremenu {
+  position: absolute;
+  top: 52px;
+  right: 8px;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  background: #ffffff;
+  color: #1f2328;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+body.dark #moremenu { background: #262b31; color: #e6edf3; }
+#moremenu[hidden] { display: none; }
+#moremenu button {
+  width: 100%;
+  text-align: left;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+}
+#moremenu button:active { background: rgba(128, 128, 128, 0.18); }
+
+#crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 6px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  opacity: 0.9;
+}
+#crumb .doc-ico { flex: 0 0 auto; opacity: 0.7; }
+#doc-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+#crumb .chev { flex: 0 0 auto; opacity: 0.45; }
+#status { margin-left: auto; padding: 0; font-size: 12px; opacity: 0.65; flex: 0 0 auto; }
+
+#findbar button {
+  flex: 0 0 auto;
+  font-size: 14px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: rgba(128, 128, 128, 0.10);
+  color: inherit;
+}
+body.dark #findbar button { background: rgba(255, 255, 255, 0.08); }
+
+#findbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  background: rgba(128, 128, 128, 0.08);
+  flex: 0 0 auto;
+}
+#findbar[hidden] { display: none; }
+#findq, #findr {
+  flex: 1 0 90px;
+  min-width: 90px;
+  font-size: 14px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.45);
+  background: transparent;
+  color: inherit;
+}
+
+#host {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+.cm-editor { height: 100%; }
+.cm-editor .cm-scroller {
+  font-family: ui-monospace, "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+  font-size: 15px;
+  line-height: 1.2;
+  padding: 8px 0 40vh 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.cm-editor .cm-content { padding: 0 12px 0 4px; caret-color: #0969da; touch-action: pan-y; }
+body.dark .cm-editor .cm-content { caret-color: #58a6ff; }
+.cm-editor .cm-gutters {
+  border-right: 1px solid rgba(128, 128, 128, 0.25);
+  font-size: 12px;
+}
+body.dark .cm-editor, body.dark .cm-gutters { background: #1f2328; color: #e6edf3; }
+body.dark .cm-editor .cm-activeLine { background: rgba(88, 166, 255, 0.10); }
+
+.cm-md-heading { font-weight: 700; }
+.cm-md-fence { background: rgba(125,125,125,0.10); font-family: ui-monospace, monospace; }
+.cm-md-list { color: inherit; }
+body.dark .cm-md-fence { background: rgba(255,255,255,0.08); }
+
+body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+
+/* 覆盖层（命令面板 / 大纲 / 设置）：编辑器在 panel 子窗口里盖住 Compose，所以面板必须做在页内。 */
+.overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 20;
+}
+.overlay[hidden] { display: none; }
+.sheet {
+  margin-top: 8vh;
+  width: min(92vw, 560px);
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #1f2328;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+body.dark .sheet { background: #262b31; color: #e6edf3; }
+.sheet .title { font-size: 15px; font-weight: 600; }
+#palette-q {
+  font-size: 15px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(128, 128, 128, 0.45);
+  background: transparent;
+  color: inherit;
+}
+.list { overflow-y: auto; flex: 1 1 auto; -webkit-overflow-scrolling: touch; }
+.list .item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 8px;
+  border: 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+}
+.list .item small { opacity: 0.6; margin-left: 8px; font-size: 12px; }
+.list .item.on { background: rgba(9, 105, 218, 0.12); font-weight: 600; }
+body.dark .list .item.on { background: rgba(88, 166, 255, 0.16); }
+.list .item.lvl-2 { padding-left: 20px; }
+.list .item.lvl-3 { padding-left: 32px; }
+.list .item.lvl-4 { padding-left: 44px; }
+.list .item.lvl-5 { padding-left: 56px; }
+.list .item.lvl-6 { padding-left: 68px; }
+.sheet .close {
+  align-self: flex-end;
+  font-size: 14px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: rgba(128, 128, 128, 0.12);
+  color: inherit;
+}
+.sheet .field { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.sheet .field .field-label { font-size: 13px; opacity: 0.85; }
+.sheet .field input[type="range"] { width: 100%; }
+.sheet .field.inline { flex-direction: row; align-items: center; gap: 8px; }
+#findbar button.on { outline: 2px solid #0969da; }
+body.dark #findbar button.on { outline: 2px solid #58a6ff; }

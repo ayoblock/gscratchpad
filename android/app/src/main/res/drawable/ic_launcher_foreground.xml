@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  按 D:\seedwork\scratchpad\android\tmp\图标设计.png 复刻：
+  深藏青底 + 米白圆角卡片 + 三行手写笔迹（中行带暖橙光晕）+ 右下橙色光标条。
+  108 viewport 自适应图标坐标系；cursive 笔迹以波浪 stroke 路径近似原稿笔势。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 米白圆角卡片 -->
+    <path android:pathData="M33,17 H75 Q91,17 91,33 V75 Q91,91 75,91 H33 Q17,91 17,75 V33 Q17,17 33,17 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="17"
+                android:endX="54"
+                android:endY="91"
+                android:startColor="#F8F2E8"
+                android:endColor="#EFE9DF" />
+        </aapt:attr>
+    </path>
+
+    <!-- 中行的暖橙光晕（横向光带，上下淡出） -->
+    <path android:pathData="M17,48 H91 V58 H17 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="47"
+                android:endX="54"
+                android:endY="59"
+                android:startColor="#00F7B267"
+                android:centerX="54"
+                android:centerY="52.5"
+                android:endColor="#4DF7B267" />
+        </aapt:attr>
+    </path>
+
+    <!-- 第一行手写笔迹：起笔小环 + 一串渐弱波浪 + 收笔长划 -->
+    <path
+        android:strokeColor="#1E2A3A"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M29,43 C28,36 31,34 32,39 C33,43 35,44 37,41 C39,38 41,38 42,41 C43,43 44,44 46,41 C48,38 50,38 51,41 C52,43 53,44 55,42 C57,40 58,41 60,42 L64,43" />
+    <path
+        android:strokeColor="#1E2A3A"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M69,43 L77,43" />
+    <path
+        android:strokeColor="#1E2A3A"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M81,43 L87,43" />
+
+    <!-- 第二行（叠在光晕上）：同构波浪，笔画更细 -->
+    <path
+        android:strokeColor="#223042"
+        android:strokeWidth="2.3"
+        android:strokeLineCap="round"
+        android:pathData="M29,55 C28,49 31,47 32,52 C33,55 35,56 37,53 C39,50 41,50 42,53 C43,55 44,56 46,53 C48,50 50,50 51,53 C52,55 53,56 55,54 L59,55" />
+    <path
+        android:strokeColor="#223042"
+        android:strokeWidth="2.3"
+        android:strokeLineCap="round"
+        android:pathData="M63,55 L70,55" />
+    <path
+        android:strokeColor="#223042"
+        android:strokeWidth="2.3"
+        android:strokeLineCap="round"
+        android:pathData="M74,55 L83,55" />
+
+    <!-- 第三行：波浪 + 双短划 -->
+    <path
+        android:strokeColor="#1E2A3A"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M29,69 C28,62 31,60 32,65 C33,69 35,70 37,67 C39,64 41,64 42,67 C43,69 44,70 46,67 C48,64 50,64 51,67 L54,68" />
+    <path
+        android:strokeColor="#1E2A3A"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M58,69 L68,69" />
+    <path
+        android:strokeColor="#1E2A3A"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M72,69 L80,69" />
+
+    <!-- 右下橙色光标条 -->
+    <path
+        android:strokeColor="#F5A623"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:pathData="M86,60 L86,75" />
+</vector>

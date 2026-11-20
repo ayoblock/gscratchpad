@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Gscratchpad
+Name[zh_CN]=GNOME 速记本
+GenericName=Scratchpad
+GenericName[zh_CN]=即时记事本
+Comment=Quick notes with auto-save, tabs, Markdown preview and PDF export
+Comment[zh_CN]=自动保存的即时记事本：多标签、Markdown 预览、PDF 导出
+Exec=gscratchpad %U
+TryExec=gscratchpad
+Icon=io.github.gscratchpad.Gscratchpad
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;
+StartupNotify=true
+StartupWMClass=io.github.gscratchpad.Gscratchpad
+X-GNOME-UsesNotifications=false
