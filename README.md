@@ -1,9 +1,6 @@
 # Gscratchpad
 
-**A local-first instant notepad for the Linux desktop, with a native Android port.**
-Open it and just start typing — everything saves automatically, tabs and content are fully restored after a restart, and all data stays on your device.
-
-一款 Ubuntu 桌面即时记事本（GTK4 / libadwaita）及其 Android 移植版（Kotlin + Compose + CodeMirror 6）。打开即可输入，无需手动保存，重启自动恢复全部标签页与内容，所有数据保存在本地。
+一款**本地优先**的即时记事本：桌面版基于 GTK4 / libadwaita（Python），Android 版为 Kotlin + Compose + CodeMirror 6 原生移植。打开即写，无需手动保存；重启后标签页、正文与光标位置完整恢复；所有数据只保存在你自己的设备上，离线可用。
 
 | 桌面版 | Android 版 |
 | --- | --- |
@@ -11,9 +8,20 @@ Open it and just start typing — everything saves automatically, tabs and conte
 | DEB 安装，Ubuntu 26.04 LTS | Android 8.0+（APK，arm64-v8a / x86_64） |
 | 见 [docs/DESKTOP_GUIDE.md](docs/DESKTOP_GUIDE.md) | 见 [docs/ANDROID_IMPLEMENTATION.md](docs/ANDROID_IMPLEMENTATION.md) |
 
-![侧边栏](docs/screenshots/06-sidebar-sort.png)
-![大纲](docs/screenshots/02-outline.png)
-![目录搜索](docs/screenshots/07-search-results.png)
+## 界面预览
+
+**桌面版**
+
+![Markdown 大纲与标题跳转](docs/screenshots/02-outline.png)
+![磁盘文件树](docs/screenshots/03-disk.png)
+![专注编辑（侧边栏隐藏）](docs/screenshots/04-sidebar-hidden.png)
+![目录递归搜索与批量替换](docs/screenshots/07-search-results.png)
+
+**Android 版**
+
+![主页与最近文档](docs/screenshots/android-01-home.png)
+![以工作目录为根的文件浏览器](docs/screenshots/android-02-workdir.png)
+![Markdown 预览与代码块复制](docs/screenshots/android-03-preview.png)
 
 ## 功能亮点
 
@@ -40,10 +48,12 @@ Open it and just start typing — everything saves automatically, tabs and conte
 
 **Android 版特性**
 
-- 与桌面版同构的数据模型，桌面备份 zip 可直接导入
-- 镜像级中断恢复：强杀进程后最后一批输入零丢失
-- 编辑器 ↔ 预览同页切换、弹出式文档列表切换、代码块一键复制
-- SAF 打开/另存到本地任意目录、工作目录绑定（新建/另存默认落入）
+- 与桌面版同构的数据模型，桌面备份 zip 可直接导入；镜像级中断恢复，强杀进程后最后一批输入零丢失
+- **File 直读工作目录与打开文件**：绑定后「打开文件」浏览器直接落在该目录，「上级」不越界；绕开部分 ROM 的 SAF 视图过滤导致的「看不到文件 / 目录缺失」
+- **原子写回**：fsync + 读回校验 + 原子换名，异常中断不留半截文件；SAF 另存用中性 MIME，不会被系统改写后缀
+- 编辑器 ↔ 预览同页切换、弹出式文档列表（列出同目录全部文档）、代码块一键复制
+- 维护功能与桌面对齐：清除已关闭笔记、清理孤儿文件，提示如实标注「只删应用内记录」
+- 存储权限按系统版本分流：Android 11+ 用 MANAGE_EXTERNAL_STORAGE，低版本动态申请 + Android 10 兼容标志；返回键一次退出，不被常驻 WebView 面板拦截
 - WebDAV 云备份与恢复、PDF 打印导出、物理键盘快捷键、夜间模式
 
 ## 安装
@@ -96,7 +106,7 @@ cd android/tools/editor && npm install && node build.mjs && cd ../..
 export ANDROID_HOME=<Android SDK 路径>
 
 gradle :app:assembleDebug            # debug 包，仅本地回归
-gradle :app:testDebugUnitTest        # JVM 单测（142 条 / 23 套件）
+gradle :app:testDebugUnitTest        # JVM 单测（202 条 / 30 套件）
 gradle :app:coverageGate             # domain 层行覆盖 ≥80% 门禁
 gradle :app:lintRelease              # lint 0 error 门禁
 gradle :app:stageRelease             # 一站式发版：R8 + 规范命名 + 包体预算，汇入 android/dist/ 并清旧包
@@ -108,7 +118,7 @@ gradle :app:connectedDebugAndroidTest  # 仪器测试（需模拟器或真机）
 ## 测试
 
 - 桌面版：单元测试 + 真实 GUI 自动化测试（写入/崩溃恢复/自动保存/预览/查找/侧边栏等 20+ 场景），结果见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)
-- Android 版：JVM 单测 142 条 / 23 套件、domain 行覆盖 90.1%、lint 0 error、仪器测试冒烟，门禁任务见 [docs/ANDROID_ENGINEERING.md](docs/ANDROID_ENGINEERING.md) §7
+- Android 版：JVM 单测 202 条 / 30 套件、domain 行覆盖 95.6%、lint 0 error、仪器测试冒烟，门禁任务见 [docs/ANDROID_ENGINEERING.md](docs/ANDROID_ENGINEERING.md) §7
 
 ## 文档
 
