@@ -1,6 +1,6 @@
 # Android 移植 P0 Spike 报告（S1–S4）
 
-对应移植方案 §8 的四项量化验收（方案已并入 ANDROID_STAGE_STATUS.md §7 存档）。所有数字来自模拟器 `Pixel_API36`（x86_64 / API 36 / `emulator-5554`）上的实测，设备为软件渲染（swiftshader），不含真机 GPU 数据。
+对应移植方案 §8 的四项量化验收（方案已并入 ANDROID_STAGE_STATUS.md §7 存档）。所有数字来自模拟器 `Pixel_API36`（x86_64 / API 36 / `emulator-5554`）上的实测，设备为软件渲染（swiftshader），不含真机 GPU 数据。逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录，本文不写流水账。
 
 结论先行：
 

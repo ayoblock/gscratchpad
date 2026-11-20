@@ -2,7 +2,7 @@
 
 > 对应方案：移植方案 v1.0 §1–§6（已并入 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §7 存档）。
 > 工程：`android/`（Gradle，单 `:app` 模块，namespace `io.github.gscratchpad`）。
-> 版本：0.8.0（versionCode 43）。日期：2026-11-20。编辑器内核为路线 D（CodeMirror 6 in WebView）；宿主为「Activity 内常驻 WebView + `TYPE_APPLICATION_PANEL` 子窗口」，界面归一为「Compose 文档列表 + WebView 编辑器」两屏；0.7.0 完成 P2 收尾，0.7.14 起编辑器↔预览同页互斥切换，0.7.20–0.7.22 收敛 SAF 打开/另存链路并落地 My folders 页，0.7.23 文档切换改弹出式列表 + 本地文件夹工作目录绑定，0.7.24 长按菜单与 WebDAV 对话框统一为 App 深色卡片风格。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。S1 复评与常驻版实测见 [ANDROID_SPIKE_REPORT.md](ANDROID_SPIKE_REPORT.md) §7。
+> 版本：0.8.2（versionCode 45）。日期：2026-11-20。编辑器内核为路线 D（CodeMirror 6 in WebView）；宿主为「Activity 内常驻 WebView + `TYPE_APPLICATION_PANEL` 子窗口」，界面归一为「Compose 文档列表 + WebView 编辑器」两屏；0.7.0 完成 P2 收尾，0.7.14 起编辑器↔预览同页互斥切换，0.7.20–0.7.22 收敛 SAF 打开/另存链路并落地 My folders 页，0.7.23 文档切换改弹出式列表 + 本地文件夹工作目录绑定，0.7.24 长按菜单与 WebDAV 对话框统一为 App 深色卡片风格。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。S1 复评与常驻版实测见 [ANDROID_SPIKE_REPORT.md](ANDROID_SPIKE_REPORT.md) §7。
 
 ## 1. 交付范围
 
@@ -176,7 +176,7 @@ android/app/src/main/java/io/github/gscratchpad/
 
 ### 8.4 版本
 
-`versionCode=31`、`versionName=0.7.19`（版本号唯一来源 `appVersionName`/`appVersionCode`，见 `app/build.gradle.kts`）；golden 语料位于 `src/debug/assets/golden/`（仅 debug 包合并，release 不携带测试资产）；出包前必跑 `scripts/verify_apk_sanitize.ps1` 脱敏校验（ENGINEERING §10.3.1）。release 产物按规范命名 `scratchpad-<abi>-release-<versionName>.apk`，经 `stageRelease` 汇入 `android/dist/` 并清旧包。JVM 单测 90 条 / 15 套件（在原有 72 条 / 13 套件基础上，R24 增 `MarkdownSanitizerTest` 9 条、R27/R28 增 `SaveAsPolicyTest` 9 条：SAF MIME 中性类型、另存内容源 editorLatest 优先、文件名后缀幂等、标题 stem 提取；R21–R22 的界面、SAF 与测量改动以真机自检钩子兜底：`selfCheckFind / golden / cloudSelfCheck / safSelfCheck / safPowerWrite / safPowerVerify`，均未新增 JVM 用例）。
+版本号唯一来源 `appVersionName`/`appVersionCode`（见 `app/build.gradle.kts`）；**当前版本与每轮测试数字以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) 头部及 §5.4 为准**，本文不重复维护历史版本与测试计数。golden 语料位于 `src/debug/assets/golden/`（仅 debug 包合并，release 不携带测试资产）；出包前必跑 `scripts/verify_apk_sanitize.ps1` 脱敏校验（ENGINEERING §10.3.1）。release 产物按规范命名 `scratchpad-<abi>-release-<versionName>.apk`，经 `stageRelease` 汇入 `android/dist/` 并清旧包。R21–R22 的界面、SAF 与测量改动以真机自检钩子兜底：`selfCheckFind / golden / cloudSelfCheck / safSelfCheck / safPowerWrite / safPowerVerify`。
 
 ### 8.5 路线 D 编辑器宿主（0.6.0）
 

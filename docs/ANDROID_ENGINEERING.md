@@ -2,7 +2,13 @@
 
 本文只写已在本机（Linux，JDK 21）实际执行过的取值与数据；早期 Windows 环境安装记录见 [archive/ANDROID_ENV_SETUP.md](archive/ANDROID_ENV_SETUP.md)。命令均在 `android/` 下执行，本地命令形态见 §1「命令执行纪律」。
 
-> 当前版本 **0.8.2（versionCode 45）**，最近一轮 R44（2026-11-20）：华为 YAL-AL10（Android 10）权限已授予仍列空的根修复（targetSdk≥29 分区存储强制生效，File API 对共享存储返回空 → Manifest 加 `requestLegacyExternalStorage="true"`，仅 Android 10 生效、11+ 忽略）+ 主页按钮归位改名（「从云盘或其它位置打开」移到「设置工作目录」下方；「打开本地文件夹（设为工作目录）」改名「设置工作目录」）。历轮编译失败模式已沉淀至用户级 skill `android-port-playbook` §3.1。202 单测 / 30 套件 / 0 失败，domain 95.6%（349/365），门禁全绿、upload key 出包。上一轮 R43：打开入口合并 + 文件浏览器以工作目录为根。机 AGP 9.5.1 要求 Gradle 9.x，取 9.9.1 |
+> 当前版本 **0.8.2（versionCode 45）**，最近一轮 R44（2026-11-20）：华为 YAL-AL10（Android 10）权限已授予仍列空的根修复（targetSdk≥29 分区存储强制生效，File API 对共享存储返回空 → Manifest 加 `requestLegacyExternalStorage="true"`，仅 Android 10 生效、11+ 忽略）+ 主页按钮归位改名（「从云盘或其它位置打开」移到「设置工作目录」下方；「打开本地文件夹（设为工作目录）」改名「设置工作目录」）。历轮编译失败模式已沉淀至用户级 skill `android-port-playbook` §3.1。202 单测 / 30 套件 / 0 失败，domain 95.6%（349/365），门禁全绿、upload key 出包。上一轮 R43：打开入口合并 + 文件浏览器以工作目录为根。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
+
+## 1. 工具链（实测）
+
+| 项 | 取值 | 说明 |
+|---|---|---|
+| Gradle | 9.9.1（`gradlew` 已生成，wrapper 锁定同版本） | 方案 §12 写 Gradle 8.x；本机 AGP 9.5.1 要求 Gradle 9.x，取 9.9.1 |
 | AGP | 9.5.1 | 内置 Kotlin，禁止再 apply `org.jetbrains.kotlin.android`（会报 `Cannot add extension with name 'kotlin'`） |
 | Kotlin | 由 AGP 内置（KGP 随 AGP） | 编译任务落在 `intermediates/built_in_kotlinc/...` |
 | Compose | `org.jetbrains.kotlin.plugin.compose` 2.2.10 + `compose-bom 2025.10.01` | BOM 2026.09 需 compileSdk 37，本机只有 36 |
