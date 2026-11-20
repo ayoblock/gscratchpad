@@ -19,9 +19,7 @@
 
 **Android 版**
 
-![主页与最近文档](docs/screenshots/android-01-home.png)
-![以工作目录为根的文件浏览器](docs/screenshots/android-02-workdir.png)
-![Markdown 预览与代码块复制](docs/screenshots/android-03-preview.png)
+![主页与最近文档](docs/screenshots/android-preview.png)
 
 ## 功能亮点
 
