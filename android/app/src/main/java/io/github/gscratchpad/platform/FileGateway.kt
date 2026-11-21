@@ -28,23 +28,41 @@ class FileGateway {
      * 失败不抛异常——由调用方回退 SAF，保证「File 通道失败 = 退回原行为」，不会更糟。
      */
     suspend fun saveAtomic(path: String, text: String, style: TextStyle): Boolean =
+        saveAtomicDetailed(path, text, style) == null
+
+    /**
+     * R45：带失败原因的原子写回。返回 null 表示成功；非 null 为具体失败环节描述，
+     * 供调用方提示与日志定位——「路径不可写」可能是五个环节中任意一个，不能再一律笼统上报。
+     */
+    suspend fun saveAtomicDetailed(path: String, text: String, style: TextStyle): String? =
         withContext(Dispatchers.IO) {
             val target = File(path)
-            if (!FileDirectPolicy.isSharedStoragePath(target.absolutePath)) return@withContext false
+            if (!FileDirectPolicy.isSharedStoragePath(target.absolutePath)) {
+                return@withContext "路径不在共享存储内：${target.absolutePath}"
+            }
             val bytes = TextCodec.encode(text, style)
-            val parent = target.parentFile ?: return@withContext false
-            if (!parent.exists() && !parent.mkdirs()) return@withContext false
+            val parent = target.parentFile
+                ?: return@withContext "无父目录：${target.absolutePath}"
+            if (!parent.exists() && !parent.mkdirs()) {
+                return@withContext "父目录不存在且无法创建：${parent.absolutePath}"
+            }
 
             val tmp = File(parent, ".${target.name}.gs-${System.nanoTime()}.tmp")
             try {
-                tmp.outputStream().use { out ->
-                    out.write(bytes)
-                    out.flush()
-                    runCatching { out.fd.sync() }
+                try {
+                    tmp.outputStream().use { out ->
+                        out.write(bytes)
+                        out.flush()
+                        runCatching { out.fd.sync() }
+                    }
+                } catch (e: Exception) {
+                    return@withContext "临时文件写入失败：${e.message}"
                 }
                 // 读回校验：确认临时文件完整后再替换，避免半截写覆盖原文件。
                 val readBack = runCatching { tmp.readBytes() }.getOrNull()
-                if (readBack == null || !readBack.contentEquals(bytes)) return@withContext false
+                if (readBack == null || !readBack.contentEquals(bytes)) {
+                    return@withContext "读回校验失败（写入不完整）"
+                }
 
                 val moved = runCatching {
                     Files.move(
@@ -56,12 +74,12 @@ class FileGateway {
                 }.isSuccess || runCatching {
                     Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
                 }.isSuccess
-                if (!moved) return@withContext false
+                if (!moved) return@withContext "原子替换失败（rename 被拒绝）：${target.name}"
                 android.util.Log.d("FileGateway", "atomic-save ok: ${target.name} bytes=${bytes.size}")
-                true
+                null
             } catch (e: Exception) {
                 android.util.Log.d("FileGateway", "atomic-save failed: ${e.message}")
-                false
+                "写回异常：${e.message}"
             } finally {
                 if (tmp.exists()) runCatching { tmp.delete() }
             }

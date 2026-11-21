@@ -722,11 +722,14 @@ class MainActivity : ComponentActivity() {
             Charsets.UTF_8, false, io.github.gscratchpad.platform.NewlineStyle.LF,
         )
         when {
-            // R40：File 直读路径绑定——真实路径写回，不产生 .old
+            // R40：File 直读路径绑定——真实路径写回，不产生 .old。
+            // R45：失败原因细化上报（共享存储校验/父目录/临时写入/读回/替换五环节），便于真机定位。
             sp.startsWith("/") -> {
-                runCatching {
-                    if (!fileGateway.saveAtomic(sp, content, style)) toast("外部文件同步失败：路径不可写")
-                }.onFailure { toast("外部文件同步失败：${it.message}") }
+                val err = fileGateway.saveAtomicDetailed(sp, content, style)
+                if (err != null) {
+                    android.util.Log.w("Gscratchpad", "saveExternal failed path=$sp err=$err")
+                    toast("外部文件同步失败：$err")
+                }
             }
             // 旧 SAF 绑定：sourcePath 是 content:// URI
             sp.startsWith("content://") -> {
@@ -1558,13 +1561,18 @@ class MainActivity : ComponentActivity() {
      */
     private fun openWorkDirFile(path: String) {
         lifecycleScope.launch {
-            // 路径安全：必须在共享存储下，且在当前绑定工作目录内
-            val dir = workDirBinding.value?.path
+            // 路径安全：必须在共享存储下，且在「当前文档同目录 / 绑定工作目录」（R45 口径）内
+            val activeSp = activeId.value?.let {
+                container.dao.getMeta(io.github.gscratchpad.data.MetaKeys.sourcePath(it), null)
+            }
+            val dir = io.github.gscratchpad.domain.WorkDirSwitchList.dirForList(
+                activeSp, workDirBinding.value?.path,
+            )
             if (dir.isNullOrBlank() ||
                 !io.github.gscratchpad.platform.FileDirectPolicy.isSharedStoragePath(path) ||
                 io.github.gscratchpad.domain.WorkDirSwitchList.parentOf(path) != dir.trimEnd('/')
             ) {
-                toast("文件不在当前工作目录内")
+                toast("文件不在可切换的目录内")
                 return@launch
             }
             // 反查已入库文档：sourcePath 精确匹配则直接切换，避免重复建文档
@@ -1605,7 +1613,12 @@ class MainActivity : ComponentActivity() {
     private fun currentDocsJson(): String {
         val all = docs.value
         val binding = workDirBinding.value
-        val dirPath = binding?.path
+        // R45：列目录口径改为「当前文档同目录优先，绑定工作目录回退」——
+        // 未绑定工作目录、或从绑定目录之外打开的文档，其同目录文件也要出现在切换列表。
+        val activeSp = activeId.value?.let {
+            container.dao.getMeta(io.github.gscratchpad.data.MetaKeys.sourcePath(it), null)
+        }
+        val dirPath = io.github.gscratchpad.domain.WorkDirSwitchList.dirForList(activeSp, binding?.path)
         val entries = all.map { doc ->
             val sp = container.dao.getMeta(io.github.gscratchpad.data.MetaKeys.sourcePath(doc.id), null)
             io.github.gscratchpad.domain.WorkDirSwitchList.DocEntry(doc.id, doc.title, sp)

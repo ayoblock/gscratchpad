@@ -2,7 +2,7 @@
 
 本文只写已在本机（Linux，JDK 21）实际执行过的取值与数据；早期 Windows 环境安装记录见 [archive/ANDROID_ENV_SETUP.md](archive/ANDROID_ENV_SETUP.md)。命令均在 `android/` 下执行，本地命令形态见 §1「命令执行纪律」。
 
-> 当前版本 **0.8.2（versionCode 45）**，最近一轮 R44（2026-11-20）：华为 YAL-AL10（Android 10）权限已授予仍列空的根修复（targetSdk≥29 分区存储强制生效，File API 对共享存储返回空 → Manifest 加 `requestLegacyExternalStorage="true"`，仅 Android 10 生效、11+ 忽略）+ 主页按钮归位改名（「从云盘或其它位置打开」移到「设置工作目录」下方；「打开本地文件夹（设为工作目录）」改名「设置工作目录」）。历轮编译失败模式已沉淀至用户级 skill `android-port-playbook` §3.1。202 单测 / 30 套件 / 0 失败，domain 95.6%（349/365），门禁全绿、upload key 出包。上一轮 R43：打开入口合并 + 文件浏览器以工作目录为根。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
+> 当前版本 **0.8.3（versionCode 46）**，最近一轮 R45（2026-11-21）：切换文档浮层口径修正（当前文档同目录优先、绑定工作目录回退，`WorkDirSwitchList.dirForList` 纯函数）+ 外部写回失败原因细化（`FileGateway.saveAtomicDetailed` 五环节上报，替代笼统「路径不可写」）+ 恢复误删的 StorageAccessTest（6 条）。205 单测 / 30 套件 / 0 失败，domain 95.7%（355/371），门禁全绿、upload key 出包。上一轮 R44：Android 10 legacy 存储标志 + 主页按钮归位改名。逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
 
 ## 1. 工具链（实测）
 
@@ -55,8 +55,8 @@ Hermetic 验证：release 包在 Pixel_API36 上安装、启动、进入预览�
 
 | 产物 | 体积 |
 |---|---|
-| `scratchpad-arm64-v8a-release-0.8.2.apk` | 3.4 MB（0.8.2 / versionCode 45，R44 upload key 正式签名） |
-| `scratchpad-x86_64-release-0.8.2.apk` | 3.4 MB（0.8.2 / versionCode 45，R44 upload key 正式签名） |
+| `scratchpad-arm64-v8a-release-0.8.3.apk` | 3.5 MB（0.8.3 / versionCode 46，R45 upload key 正式签名） |
+| `scratchpad-x86_64-release-0.8.3.apk` | 3.5 MB（0.8.3 / versionCode 46，R45 upload key 正式签名） |
 | `app-x86_64-debug.apk` | 12.4 MB |
 
 > R24 起 release 产物按发版规范重命名：`scratchpad-<abi>-release-<versionName>.apk`（abi ∈ arm64-v8a / x86_64）。由 `androidComponents.onVariants` 新版 Variant API 设置 `output.outputFileName`，`stageRelease` task 一站式构建+核验+汇入 `android/dist/` 并清旧包。**交付目录为 `android/dist/`**，debug 包不作交付。
@@ -249,6 +249,8 @@ R15 之前应用实际是「路线 C 的 Compose 编辑器壳 + 路线 D 的 Web
 
 **R44 补完（Android 10 分区存储 legacy 标志，2026-11-20，版本 0.8.2/45）**：R42 补了 READ/WRITE_EXTERNAL_STORAGE（maxSdkVersion 29）后 YAL-AL10 实测权限已授予但两个 File 浏览器仍列空——根因是 targetSdk 36 在 Android 10 设备上分区存储强制生效，传统权限只覆盖 SAF、`File.listFiles()` 对共享存储返回空。修复：`<application android:requestLegacyExternalStorage="true">`（仅 Android 10 生效，Android 11+ 忽略、不受影响）。`aapt2 dump xmltree` 已核验标志入包；列表是否恢复需用户真机确认（若 install -r 后仍空，卸载重装一次让 legacy 授权在安装期生效）。
 
+**R45 补完（切换浮层口径与写回可观测性，2026-11-21，版本 0.8.3/46）**：R41 的「切换文档列同目录」以绑定工作目录为口径，未绑定/旧 SAF 绑定/文档在绑定目录之外三种情况下退化为只列库内文档。R45 改为 `dirForList`：当前文档 sourcePath 父目录优先（共享存储路径校验 + `..` 拒绝），回退绑定目录。同时 `saveAtomicDetailed` 把写回失败细化为五环节原因（共享存储校验/父目录/临时写入/读回校验/原子替换），真机「路径不可写」的具体环节将由新 toast 文案反馈定位。另：上轮文档清洗删除 `gscatchpad/` 误放目录时连带丢失了未入库的 StorageAccessTest.kt（唯一副本），本轮按同一覆盖口径重写恢复 6 条测试。
+
 ## 10. 复现命令
 
 ```powershell
@@ -353,8 +355,8 @@ gradle :app:assembleDebug :app:stageRelease
 #   android\dist\scratchpad-arm64-v8a-release-<versionName>.apk        （真机，交付）
 #   android\dist\scratchpad-x86_64-release-<versionName>.apk           （模拟器，交付）
 # 真机 / 模拟器安装（绝对路径，交用户自行执行）
-adb install -r android\dist\scratchpad-arm64-v8a-release-0.8.2.apk
-adb install -r android\dist\scratchpad-x86_64-release-0.8.2.apk
+adb install -r android\dist\scratchpad-arm64-v8a-release-0.8.3.apk
+adb install -r android\dist\scratchpad-x86_64-release-0.8.3.apk
 ```
 
 判据：交付时给出 `android/dist/` 下两个规范命名 release 包的绝对路径 + 体积 + badging 的 `versionCode/versionName`，并附每个 ABI 的 `adb install -r` 命令（交用户自行执行，不代替安装）。`stageRelease` 自动清理 `dist/` 旧版本包，只保留本次版本。只跑 `assembleDebug` 不算交付——真机装的是 release 包，release 包过期时看到的就是旧界面（R16 前 release 长期停留在 0.6.0）。本地无 `keystore.properties` 时签名回退 Android Debug（可安装；正式发布需 CI 注入 upload key）。

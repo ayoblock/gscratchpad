@@ -34,6 +34,29 @@ object WorkDirSwitchList {
     fun fileName(path: String): String = path.substringAfterLast('/')
 
     /**
+     * R45：切换列表的列目录口径——**当前打开文档的同目录优先**。
+     *
+     * R41 以「绑定的工作目录」为口径，用户实测暴露错位：未绑定工作目录（或绑定的是
+     * 旧 SAF 授权，无 File 路径）时列表退化为只剩库内文档；且通过「打开文件」从
+     * 绑定目录之外打开的文档，其同目录文件不会出现。用户语义是「与打开的文档同目录」。
+     *
+     * 规则：
+     *  1. 当前文档有共享存储绝对路径 sourcePath → 用其父目录（无论是否绑定工作目录）；
+     *  2. 否则回退绑定工作目录的 File 路径；
+     *  3. 都没有 → null（调用方只列库内文档）。
+     */
+    fun dirForList(activeSourcePath: String?, bindingPath: String?): String? {
+        val sp = activeSourcePath?.trim()
+        if (!sp.isNullOrBlank() && sp.startsWith("/") && !sp.contains("..") &&
+            io.github.gscratchpad.platform.FileDirectPolicy.isSharedStoragePath(sp)
+        ) {
+            val parent = parentOf(sp)
+            if (parent.isNotBlank()) return parent
+        }
+        return bindingPath?.takeIf { it.isNotBlank() }
+    }
+
+    /**
      * 构建切换列表。
      * @param dirPath 绑定的工作目录绝对路径（已规范化）；null 表示未绑定。
      * @param docs 库内文档（含 sourcePath，来自 meta）。

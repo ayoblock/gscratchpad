@@ -5,6 +5,7 @@ import io.github.gscratchpad.domain.WorkDirSwitchList.DocEntry
 import io.github.gscratchpad.domain.WorkDirSwitchList.Item
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -86,5 +87,33 @@ class WorkDirSwitchListTest {
         val docs = listOf(DocEntry("d1", "甲", "$dir/a.md"))
         val result = WorkDirSwitchList.build("$dir/", docs, listOf("$dir/a.md"))
         assertEquals(listOf(Item("d1", "甲")), result)
+    }
+
+    // ---- R45：切换列表列目录口径（当前文档同目录优先，绑定工作目录回退） ----
+
+    @Test
+    fun `当前文档有共享存储路径时用其父目录_无视绑定`() {
+        val active = "/storage/emulated/0/Download/Obsidian/a.md"
+        // 即使绑定了别的目录，也以当前文档同目录为准
+        assertEquals("/storage/emulated/0/Download/Obsidian", WorkDirSwitchList.dirForList(active, dir))
+    }
+
+    @Test
+    fun `当前文档无有效路径时回退绑定目录`() {
+        assertEquals(dir, WorkDirSwitchList.dirForList(null, dir))
+        // content://（旧 SAF 打开）不是 File 路径 → 回退
+        assertEquals(dir, WorkDirSwitchList.dirForList("content://x/y/tree/a", dir))
+        // 共享存储之外的绝对路径（私有目录）不认 → 回退
+        assertEquals(dir, WorkDirSwitchList.dirForList("/data/data/x/a.md", dir))
+    }
+
+    @Test
+    fun `都没有时返回null_列表只列库内文档`() {
+        assertNull(WorkDirSwitchList.dirForList(null, null))
+        assertNull(WorkDirSwitchList.dirForList(null, ""))
+        // 绑定路径为空串也视为未绑定
+        assertNull(WorkDirSwitchList.dirForList("content://x", ""))
+        // 路径穿越不认
+        assertNull(WorkDirSwitchList.dirForList("/storage/emulated/0/../evil/a.md", null))
     }
 }
