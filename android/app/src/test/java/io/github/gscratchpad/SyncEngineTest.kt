@@ -560,6 +560,40 @@ class SyncEngineTest {
         assertEquals(0, r2.conflicts)
     }
 
+    // R51：关闭文档只改 state（内容哈希不变），push 必须仍触发，
+    // 对端应用后 closedDocuments 可见——否则对端「清理已关闭文档」清不到。
+    @Test
+    fun `state_only_change_triggers_push_and_peer_sees_closed`() {
+        val dav = MemoryDav()
+        val a = newDevice("devA")
+        val b = newDevice("devB")
+        a.putDoc("d1", "v1", 100.0)
+
+        // A 首轮推（含 d1 open），B 拉到 open
+        val r1 = engine(a, dav).run()
+        assertTrue("msg=${r1.message}", r1.ok)
+        val rb1 = engine(b, dav).run()
+        assertTrue("msg=${rb1.message}", rb1.ok)
+        assertEquals(DocState.OPEN, b.dao.get("d1")?.state)
+
+        // A 仅关闭 d1（内容/哈希不变）再推：statesChanged 必须触发重传
+        a.dao.setState("d1", DocState.CLOSED, 200.0)
+        val r2 = engine(a, dav).run()
+        assertTrue("msg=${r2.message}", r2.ok)
+
+        // B 拉：state=closed 同步落库，closedDocuments 能查到（可被「清理已关闭文档」清理）
+        val rb2 = engine(b, dav).run()
+        assertTrue("msg=${rb2.message}", rb2.ok)
+        assertEquals(DocState.CLOSED, b.dao.get("d1")?.state)
+        assertEquals(listOf("d1"), b.dao.closedDocuments().map { it.id })
+
+        // 收敛：A/B 各自再跑一轮无新变更
+        val r3 = engine(a, dav).run()
+        assertEquals(0, r3.applied)
+        val r4 = engine(b, dav).run()
+        assertEquals(0, r4.applied)
+    }
+
     // ------------------------------------------------------------ 传输面
 
     @Test

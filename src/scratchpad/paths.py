@@ -10,7 +10,7 @@ from pathlib import Path
 
 APP_ID = "io.github.gscratchpad.Gscratchpad"
 APP_NAME = "Gscratchpad"
-APP_VERSION = "1.17.4"
+APP_VERSION = "1.17.5"
 DATA_DIR_NAME = "gscratchpad"
 LEGACY_DATA_DIR_NAME = "gnome-scratchpad"
 

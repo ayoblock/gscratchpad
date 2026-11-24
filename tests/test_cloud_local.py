@@ -296,6 +296,30 @@ class CloudLocalTestCase(unittest.TestCase):
         result = self._engine(store_a).run()
         self.assertEqual(result.pushed_docs, 0)
 
+    def test_state_only_change_triggers_push_and_peer_sees_closed(self):
+        """R51：关闭文档只改 state（内容哈希不变），push 必须仍触发，
+        对端应用后 closed_documents 可见——否则对端「清理已关闭文档」清不到。"""
+        store_a = self._store("devA")
+        store_b = self._store("devB")
+
+        doc = store_a.create_document("md", title="关闭状态同步")
+        store_a.submit_save(_replace(doc, content="v1"), wait=True)
+        self._engine(store_a).run()
+        self._engine(store_b).run()
+        self.assertEqual(store_b.get(doc.id).state, "open")
+
+        # A 仅关闭文档（内容不变）再推：states_changed 必须触发重传
+        store_a.set_state(doc.id, "closed", wait=True)
+        self._engine(store_a).run()
+
+        # B 拉：state=closed 落库，closed_documents 能查到
+        self._engine(store_b).run()
+        self.assertEqual(store_b.get(doc.id).state, "closed")
+        self.assertIn(doc.id, [d.id for d in store_b.closed_documents()])
+
+        # 收敛：双端再跑一轮推送数 0
+        self.assertEqual(self._engine(store_a).run().pushed_docs, 0)
+
     def test_conflict_loser_preserved_in_recovery(self):
         store_a = self._store("devA")
         store_b = self._store("devB")

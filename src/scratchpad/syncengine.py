@@ -58,6 +58,9 @@ class SyncState:
     own_folders_hash: str = ""
     own_pushed_deleted: dict[str, float] = field(default_factory=dict)
     own_assets_pushed: list[str] = field(default_factory=list)
+    # id -> state（open/closed）。关闭/打开不改内容哈希，必须独立跟踪，
+    # 否则关闭状态永不同步、对端「清理已关闭文档」清不到（R51，与 Android 同构）。
+    own_states: dict[str, str] = field(default_factory=dict)
     peers: dict[str, dict[str, str]] = field(default_factory=dict)
     last_result: str = ""
 
@@ -84,6 +87,7 @@ class SyncState:
             else:
                 state.own_pushed_deleted = {str(k): float(v) for k, v in raw_pd.items()}
             state.own_assets_pushed = list(data.get("own_assets_pushed", []))
+            state.own_states = {str(k): str(v) for k, v in data.get("own_states", {}).items()}
             state.peers = {k: dict(v) for k, v in data.get("peers", {}).items()}
             state.last_result = data.get("last_result", "")
         if not state.device_id:
@@ -107,6 +111,7 @@ class SyncState:
             "own_folders_hash": self.own_folders_hash,
             "own_pushed_deleted": self.own_pushed_deleted,
             "own_assets_pushed": sorted(set(self.own_assets_pushed)),
+            "own_states": self.own_states,
             "peers": self.peers,
             "last_result": self.last_result,
         }
@@ -204,6 +209,7 @@ def plan_sync(
                         "hash": peer_hash,
                         "revision": entry["revision"],
                         "updated_at": entry["updated_at"],
+                        "state": entry.get("state", "open"),
                     }
                     working_deleted.pop(doc_id)
                     new_baseline[doc_id] = peer_hash
@@ -216,11 +222,24 @@ def plan_sync(
                     "hash": peer_hash,
                     "revision": entry["revision"],
                     "updated_at": entry["updated_at"],
+                    "state": entry.get("state", "open"),
                 }
                 new_baseline[doc_id] = peer_hash
                 continue
             local_hash = local_info["hash"]
             if peer_hash == local_hash:
+                # R51：内容同源但 state 有差异（关闭/打开不改变内容哈希）→
+                # 以 updated_at LWW 裁决：仅当对端时间戳更新才应用其 state，
+                # 防止对端陈旧 manifest 把本机刚做的关闭/打开改回去。
+                peer_state = entry.get("state", "open")
+                if peer_state != local_info.get("state", "open") and entry["updated_at"] > local_info["updated_at"]:
+                    plan.applies.append((peer.device_id, entry))
+                    working_local[doc_id] = {
+                        "hash": peer_hash,
+                        "revision": local_info["revision"],
+                        "updated_at": entry["updated_at"],
+                        "state": peer_state,
+                    }
                 new_baseline[doc_id] = peer_hash
                 continue
             peer_changed = peer_hash != baseline.get(doc_id)
@@ -235,6 +254,7 @@ def plan_sync(
                         "hash": peer_hash,
                         "revision": entry["revision"],
                         "updated_at": entry["updated_at"],
+                        "state": entry.get("state", "open"),
                     }
                     new_baseline[doc_id] = peer_hash
                 else:
@@ -246,6 +266,7 @@ def plan_sync(
                     "hash": peer_hash,
                     "revision": entry["revision"],
                     "updated_at": entry["updated_at"],
+                    "state": entry.get("state", "open"),
                 }
                 new_baseline[doc_id] = peer_hash
             else:
@@ -329,6 +350,7 @@ class SyncEngine:
                 "revision": doc.revision,
                 "updated_at": doc.updated_at,
                 "format": doc.format,
+                "state": doc.state,
             }
         folders = [(f, 0.0) for f in self.store.folders()]
 
@@ -606,7 +628,11 @@ class SyncEngine:
         folders_changed = current_folders_hash != state.own_folders_hash
         deleted_changed = state.deleted != state.own_pushed_deleted
         assets_changed = current_asset_keys != set(state.own_assets_pushed)
-        if not docs_changed and not folders_changed and not deleted_changed and not assets_changed:
+        # R51：关闭/打开只改 state 与 updated_at，content hash 不变——state 必须独立
+        # 纳入变更检测，否则对端 manifest 永久 state=open（与 Android 同构）。
+        current_states = {doc.id: doc.state for doc in docs}
+        states_changed = current_states != state.own_states
+        if not docs_changed and not folders_changed and not deleted_changed and not assets_changed and not states_changed:
             self._status("同步：本地无变更")
             return 0
 
@@ -638,6 +664,7 @@ class SyncEngine:
         state.own_pushed = current_hashes
         state.own_folders_hash = current_folders_hash
         state.own_pushed_deleted = dict(state.deleted)
+        state.own_states = dict(current_states)
         state.own_assets_pushed = sorted(pushed_set)
         return len(current_hashes)
 

@@ -5,7 +5,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$PROJECT_ROOT/dist}"
 APP_ID="io.github.gscratchpad.Gscratchpad"
-VERSION="1.17.4"
+VERSION="1.17.5"
 PKG="gscratchpad"
 STAGING="$OUT_DIR/${PKG}_${VERSION}-1"
 

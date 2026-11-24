@@ -2131,3 +2131,21 @@ PROPFIND 大小/时间解析）。真实 WebDAV 双设备复测待用户确认�
 
 - 桌面 1.17.3 → **1.17.4**；`dist/gscratchpad_1.17.4-1_all.deb`。
 - Android 0.9.2/49 → **0.9.3/50**；双 ABI release APK。
+
+## 修订四十三（v1.17.5 / Android 0.9.4）：关闭状态跨设备同步
+
+### 一、结论
+
+- 桌面 243 例 OK（新增 `test_state_only_change_triggers_push_and_peer_sees_closed`：A 仅关闭文档 → push 必触发 → B 拉到 closed → `closed_documents` 可见 → 收敛轮零操作）。
+- Android 231 例 / 0 失败（`SyncEngineTest` 新增同名 E2E，语义逐字段对应）。
+- 桌面 GUI 冒烟待本轮复跑；真实 WebDAV 双设备复测待用户确认。
+
+### 二、修复内容
+
+- push 变更检测增 `own_states`（docId→state）维度：关闭/打开不改内容哈希，此前判「无变化」不重传 manifest，对端永久 state=open，「清理已关闭文档」清不到。
+- planSync 哈希相等分支增 state LWW：state 有差异且对端 updated_at 更新才应用，防对端陈旧 manifest 把本机刚做的关闭改回去（桌面测试实证了该竞态）。
+- 墓碑裁决不变。
+
+### 三、版本与产物
+
+- 桌面 1.17.4 → **1.17.5**；Android 0.9.3/50 → **0.9.4/51**；双端 release 产物。

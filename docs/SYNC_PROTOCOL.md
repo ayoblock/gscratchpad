@@ -1,6 +1,6 @@
 # GScratchpad 云同步协议（sync v1）
 
-状态：active（2026-11-25） · 适用：桌面 ≥1.17.4 / Android ≥0.9.3 · 传输：WebDAV
+状态：active（2026-11-25） · 适用：桌面 ≥1.17.5 / Android ≥0.9.4 · 传输：WebDAV
 
 > **Android 0.9.1 相对 v1 基线语义的三处调整（用户拍板）**：① 冲突败者由 `recovery/`
 > 纯文本改为**可编辑冲突文档**（§7）；② 冲突裁决由纯 `updated_at` 改为
@@ -115,13 +115,15 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
    本地现状 = 当前 content_hash）：
    - 仅远端变 → 应用（§6）。
    - 双变（远端 ≠ 基线 且 本地 ≠ own_pushed 且 本地 ≠ 远端）→ 冲突（§7）。
-   - 内容 hash 相等 → 仅刷新基线。
+   - 内容 hash 相等 → 仅刷新基线；**例外（R51）**：`state` 有差异且对端
+     `updated_at` 更新 → 仍应用（LWW，关闭/打开不改内容哈希）。
    - 本地 `deleted_ids` ∩ 对端 `docs` → 恢复（§4.3）。
    - 对端 `deleted` ∩ 本地现存 → 删除传播（§4.2）。
    - 对端 folders 变化 → 合并 folders 表（INSERT OR IGNORE）。
-2. **Push**：对比当前本地全部 docs/folders 与 `own_pushed`/`own_folders_hash`；
+2. **Push**：对比当前本地全部 docs/folders 与 `own_pushed`/`own_folders_hash`/
+   `own_states`（R51 起，关闭状态不改变内容哈希，必须独立跟踪）；
    有差异 → 上传新 assets → 重写 docs.zip → 重写 manifest.json → 更新
-   `own_pushed`。无差异且远端 manifest 本地已记录 → 跳过上传。
+   `own_pushed`/`own_states`。无差异且远端 manifest 本地已记录 → 跳过上传。
 3. 写回 `sync-state.json`（原子写），记录 last_result 供状态行展示。
 
 ## 6. 应用远端文档
@@ -191,12 +193,15 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
   deviceId 元组裁决 / 墓碑 90 天清理（见文首三处调整说明）；0.9.2 修正
   `SyncDav` 的 MKCOL/PROPFIND 传输路径（见 §8），新增 `SyncDavRawTest`
   以本地 HTTP 服务端覆盖这两条非标准方法；0.9.3 双端统一整包备份命名
-  `gscratchpad-cloud-<device-id>.zip` 并从云端列举点选恢复（见 §2/§9）。
+  `gscratchpad-cloud-<device-id>.zip` 并从云端列举点选恢复（见 §2/§9）；
+  0.9.4 关闭状态纳入推送变更检测 + 哈希相等时 state LWW 应用（见 §5，
+  与桌面 1.17.5 同构）——修复「对端同步来的已关闭文档清不到」。
 - 夹具：桌面 `tests/test_sync_merge.py`（SM-01…SM-11）= Android
   `SyncEngineTest` 同名场景，逐字段对应。
-- 已验证：桌面 242 例、Android 230 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
+- 已验证：桌面 243 例、Android 231 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
   tombstone TTL，改 1 例：冲突败者改为可编辑文档；0.9.2 增 `SyncDavRawTest` 2 例；
-  0.9.3 双端各增 `CloudBackupTest` 3 例与 `test_cloud_local` 2 例）；
+  0.9.3 双端各增 `CloudBackupTest` 3 例与 `test_cloud_local` 2 例；
+  0.9.4/1.17.5 双端各增 state 同步 E2E 1 例）；
   真实 AList 服务器
   （`http://10.42.239.55:5244/dav/hdd/test`）双设备 E2E 全过：
   推→拉→互改→冲突 updated_at 新者胜+败者保全→删除传播→删除正文保全。

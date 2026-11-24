@@ -49,6 +49,9 @@ data class SyncState(
     var ownFoldersHash: String = "",
     var ownPushedDeleted: MutableMap<String, Double> = mutableMapOf(),
     val ownAssetsPushed: MutableSet<String> = mutableSetOf(),
+    /** docId -> 上次推送的 state（open/closed）。关闭/打开不改内容哈希，
+     *  必须独立跟踪，否则关闭状态永不同步、对端「清理已关闭文档」清不到（R51）。 */
+    val ownStates: MutableMap<String, String> = mutableMapOf(),
     /** peerId -> docId -> 上次应用的 content_hash（基线）。 */
     val peers: MutableMap<String, MutableMap<String, String>> = mutableMapOf(),
     var lastResult: String = "",
@@ -75,6 +78,10 @@ data class SyncState(
                 if (pd != null) pd.keys().forEach { state.ownPushedDeleted[it] = pd.optDouble(it, 0.0) }
                 val assets = data.optJSONArray("own_assets_pushed")
                 if (assets != null) for (i in 0 until assets.length()) state.ownAssetsPushed.add(assets.optString(i))
+                val ownStates = data.optJSONObject("own_states")
+                if (ownStates != null) {
+                    ownStates.keys().forEach { state.ownStates[it] = ownStates.optString(it) }
+                }
                 val peers = data.optJSONObject("peers")
                 if (peers != null) {
                     peers.keys().forEach { peerId ->
@@ -104,6 +111,8 @@ data class SyncState(
             state.ownPushedDeleted.forEach { (k, v) -> pd.put(k, v) }
             val assetsArr = org.json.JSONArray()
             state.ownAssetsPushed.sorted().forEach { assetsArr.put(it) }
+            val ownStates = JSONObject()
+            state.ownStates.forEach { (k, v) -> ownStates.put(k, v) }
             val peers = JSONObject()
             state.peers.forEach { (peerId, docs) ->
                 val m = JSONObject()
@@ -119,6 +128,7 @@ data class SyncState(
                 .put("own_folders_hash", state.ownFoldersHash)
                 .put("own_pushed_deleted", pd)
                 .put("own_assets_pushed", assetsArr)
+                .put("own_states", ownStates)
                 .put("peers", peers)
                 .put("last_result", state.lastResult)
             file.parentFile?.mkdirs()
@@ -179,7 +189,13 @@ data class PeerManifest(
     val exportedAt: Double,
 )
 
-data class LocalDocInfo(val hash: String, val revision: Long, val updatedAt: Double)
+data class LocalDocInfo(
+    val hash: String,
+    val revision: Long,
+    val updatedAt: Double,
+    /** R51：参与合并的本地 state；哈希相等但 state 有差异时仍需应用对端条目。 */
+    val state: String = "open",
+)
 
 /**
  * 纯函数合并规划器（与桌面 plan_sync 逐语义对应；夹具 SM-01…SM-11 双端共用）。
@@ -266,7 +282,7 @@ object SyncPlanner {
                         // 对端文档比墓碑新：对端重建/编辑胜 → 恢复（规约 §4.3）
                         undelete.add(docId)
                         applies.add(peer.deviceId to entry)
-                        workingLocal[docId] = LocalDocInfo(peerHash, (entry["revision"] as? Number)?.toLong() ?: 0L, updatedAt)
+                        workingLocal[docId] = LocalDocInfo(peerHash, (entry["revision"] as? Number)?.toLong() ?: 0L, updatedAt, entry["state"] as? String ?: "open")
                         workingDeleted.remove(docId)
                         newBaseline[docId] = peerHash
                     }
@@ -276,16 +292,26 @@ object SyncPlanner {
                 val localInfo = workingLocal[docId]
                 if (localInfo == null) {
                     applies.add(peer.deviceId to entry)
-                    workingLocal[docId] = LocalDocInfo(
-                        peerHash,
-                        (entry["revision"] as? Number)?.toLong() ?: 0L,
-                        (entry["updated_at"] as? Number)?.toDouble() ?: 0.0,
-                    )
+                        workingLocal[docId] = LocalDocInfo(
+                            peerHash,
+                            (entry["revision"] as? Number)?.toLong() ?: 0L,
+                            (entry["updated_at"] as? Number)?.toDouble() ?: 0.0,
+                            entry["state"] as? String ?: "open",
+                        )
                     newBaseline[docId] = peerHash
                     continue
                 }
                 val localHash = localInfo.hash
                 if (peerHash == localHash) {
+                    // R51：内容同源但 state 有差异（关闭/打开不改变内容哈希）→
+                    // 以 updated_at LWW 裁决：仅当对端时间戳更新才应用其 state，
+                    // 防止对端陈旧 manifest 把本机刚做的关闭/打开改回去。
+                    val peerState = entry["state"] as? String ?: "open"
+                    val peerUpdatedAt = (entry["updated_at"] as? Number)?.toDouble() ?: 0.0
+                    if (peerState != localInfo.state && peerUpdatedAt > localInfo.updatedAt) {
+                        applies.add(peer.deviceId to entry)
+                        workingLocal[docId] = LocalDocInfo(peerHash, localInfo.revision, peerUpdatedAt, peerState)
+                    }
                     newBaseline[docId] = peerHash
                     continue
                 }
@@ -301,7 +327,7 @@ object SyncPlanner {
                     if (peerWins) {
                         preserveLocal.add(docId)
                         applies.add(peer.deviceId to entry)
-                        workingLocal[docId] = LocalDocInfo(peerHash, (entry["revision"] as? Number)?.toLong() ?: 0L, peerUpdatedAt)
+                        workingLocal[docId] = LocalDocInfo(peerHash, (entry["revision"] as? Number)?.toLong() ?: 0L, peerUpdatedAt, entry["state"] as? String ?: "open")
                         newBaseline[docId] = peerHash
                     } else {
                         preservePeer.add(peer.deviceId to docId)
@@ -309,11 +335,12 @@ object SyncPlanner {
                     conflicts++
                 } else if (peerChanged && !localChanged) {
                     applies.add(peer.deviceId to entry)
-                    workingLocal[docId] = LocalDocInfo(
-                        peerHash,
-                        (entry["revision"] as? Number)?.toLong() ?: 0L,
-                        (entry["updated_at"] as? Number)?.toDouble() ?: 0.0,
-                    )
+                        workingLocal[docId] = LocalDocInfo(
+                            peerHash,
+                            (entry["revision"] as? Number)?.toLong() ?: 0L,
+                            (entry["updated_at"] as? Number)?.toDouble() ?: 0.0,
+                            entry["state"] as? String ?: "open",
+                        )
                     newBaseline[docId] = peerHash
                 } else {
                     // 仅本地变（push 处理）或内容同源：仅刷新基线
@@ -398,7 +425,7 @@ class SyncEngine(
         val state = SyncState.load(stateFile)
         val all = dao.allDocuments(includeClosed = true)
         val local = all.associate {
-            it.id to LocalDocInfo(SyncProtocol.contentHash(it.content), it.revision, it.updatedAt)
+            it.id to LocalDocInfo(SyncProtocol.contentHash(it.content), it.revision, it.updatedAt, it.state.id)
         }.toMutableMap()
         val folders = dao.folderRows().map { it.name to it.createdAt }
 
@@ -711,7 +738,11 @@ class SyncEngine(
         val foldersChanged = currentFoldersHash != state.ownFoldersHash
         val deletedChanged = state.deleted != state.ownPushedDeleted
         val assetsChanged = currentAssetKeys != state.ownAssetsPushed
-        if (!docsChanged && !foldersChanged && !deletedChanged && !assetsChanged) return 0
+        // R51：关闭/打开只改 state 与 updated_at，content hash 不变——state 必须独立纳入
+        // 变更检测，否则对端 manifest 永久 state=open，其「清理已关闭文档」清不到。
+        val currentStates = docs.associate { it.id to it.state.id }
+        val statesChanged = currentStates != state.ownStates
+        if (!docsChanged && !foldersChanged && !deletedChanged && !assetsChanged && !statesChanged) return 0
 
         dav.mkcolDeep("sync/${state.deviceId}")
         val (manifest, docsZip) = buildManifest(state, docs, folders)
@@ -735,6 +766,8 @@ class SyncEngine(
         state.ownPushed = currentHashes.toMutableMap()
         state.ownFoldersHash = currentFoldersHash
         state.ownPushedDeleted = state.deleted.toMutableMap()
+        state.ownStates.clear()
+        state.ownStates.putAll(currentStates)
         state.ownAssetsPushed.clear()
         state.ownAssetsPushed.addAll(pushed)
         return currentHashes.size
