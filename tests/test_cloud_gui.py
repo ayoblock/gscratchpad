@@ -66,6 +66,7 @@ class CloudGuiTest:
                 "cloud-sync-now",
                 "cloud-backup-now",
                 "cloud-import-backup",
+                "cloud-restore",
             )
         )
         # 标题栏「同步」按钮：位于主题与查找之间

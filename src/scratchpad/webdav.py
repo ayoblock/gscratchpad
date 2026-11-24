@@ -189,15 +189,17 @@ class WebDavClient:
                         status,
                     )
 
-    def propfind_children(self, path: str) -> list[str]:
-        """Depth:1 枚举子项名。返回第一层子目录/文件的名字列表（URL 解码后）。"""
+    def propfind_entries(self, path: str) -> list[tuple[str, int, str]]:
+        """Depth:1 枚举子项（名称、字节数、修改时间），供云端备份列表使用。"""
         body = (
             '<?xml version="1.0" encoding="utf-8"?>'
-            '<D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>'
+            '<D:propfind xmlns:D="DAV:"><D:prop>'
+            '<D:resourcetype/><D:getcontentlength/><D:getlastmodified/>'
+            '</D:prop></D:propfind>'
         )
         status, data, _ = self._request_retry(
             "PROPFIND",
-            join_url(self.base, path) + "/",
+            (join_url(self.base, "") if not path.strip("/") else join_url(self.base, path) + "/"),
             data=body.encode("utf-8"),
             headers={"Depth": "1", "Content-Type": "application/xml"},
         )
@@ -205,7 +207,42 @@ class WebDavClient:
             return []
         if not (200 <= status <= 299 or status == 207):
             raise self._http_error("列目录", status)
-        return _parse_propfind_names(data.decode("utf-8", "replace"), posixpath.basename(path))
+        return _parse_propfind_entries(data.decode("utf-8", "replace"), posixpath.basename(path))
+
+    def propfind_children(self, path: str) -> list[str]:
+        """Depth:1 枚举子项名。返回第一层子目录/文件的名字列表（URL 解码后）。"""
+        return [name for name, _, _ in self.propfind_entries(path)]
+
+
+def _xml_tag(block: str, name: str) -> str | None:
+    match = re.search(
+        rf"<(?:[A-Za-z0-9]+:)?{name}\b[^>]*>(.*?)</(?:[A-Za-z0-9]+:)?{name}>",
+        block,
+        re.S,
+    )
+    return match.group(1).strip() if match else None
+
+
+def _parse_propfind_entries(xml_text: str, self_name: str) -> list[tuple[str, int, str]]:
+    """multistatus → 子项（名称/大小/修改时间），命名空间无关。"""
+    out: list[tuple[str, int, str]] = []
+    responses = re.finditer(
+        r"<(?:[A-Za-z0-9]+:)?response\b[^>]*>(.*?)</(?:[A-Za-z0-9]+:)?response>",
+        xml_text,
+        re.S,
+    )
+    for match in responses:
+        block = match.group(1)
+        href = _xml_tag(block, "href")
+        if not href:
+            continue
+        name = posixpath.basename(urllib.parse.unquote(href).rstrip("/"))
+        if not name or name == self_name:
+            continue
+        size_raw = _xml_tag(block, "getcontentlength")
+        size = int(size_raw) if size_raw and size_raw.isdigit() else -1
+        out.append((name, size, _xml_tag(block, "getlastmodified") or ""))
+    return out
 
 
 def _parse_propfind_names(xml_text: str, self_name: str) -> list[str]:

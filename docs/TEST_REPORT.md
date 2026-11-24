@@ -2105,3 +2105,29 @@ Android 不受影响（Room 自身线程安全）。
 
 - 桌面 1.17.2 → **1.17.3**；`dist/gscratchpad_1.17.3-1_all.deb`。
 - Android 无改动，维持 0.9.0/47。
+
+## 修订四十二（v1.17.4 / Android 0.9.3）：每设备独立备份 zip + 云端列举恢复
+
+**日期**：2026-11-25　**范围**：桌面 + Android
+
+### 一、背景
+
+多设备共用固定备份名会互相覆盖，且「从云端恢复」写死单一文件。用户拍板
+1a/2a/3a/4b：复用 sync `device_id`、PROPFIND 列表点选、旧名只读兼容、双端统一命名。
+
+### 二、改动
+
+两端整包备份改名 `gscratchpad-cloud-<device-id>.zip`；恢复端用 PROPFIND 列候选
+（含大小/修改时间），旧固定名 `gscratchpad-cloud.zip` / `gscratchpad-desktop.zip`
+保留为只读候选。桌面修 `cloud.py` 缺失的 `tempfile`/`shutil` import。
+
+### 三、测试证据
+
+桌面 **242 例 OK**（新增 2 例：命名兼容、`CloudManager` 备份/列举/下载往返）；
+Android **230 例 OK**（新增 `CloudBackupTest` 3 例：命名、上传下载回读、
+PROPFIND 大小/时间解析）。真实 WebDAV 双设备复测待用户确认。
+
+### 四、版本与产物
+
+- 桌面 1.17.3 → **1.17.4**；`dist/gscratchpad_1.17.4-1_all.deb`。
+- Android 0.9.2/49 → **0.9.3/50**；双 ABI release APK。

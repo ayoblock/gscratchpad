@@ -1078,6 +1078,17 @@ class MainActivity : ComponentActivity() {
         return cache
     }
 
+    /** R50：备份文件名复用同步 deviceId；未启用同步的设备也生成并落盘一次。 */
+    private fun cloudDeviceId(): String {
+        val stateFile = File(container.paths.root, "sync-state.json")
+        val state = io.github.gscratchpad.platform.SyncState.load(stateFile)
+        val raw = if (stateFile.exists()) runCatching { stateFile.readText() }.getOrDefault("") else ""
+        if (!raw.contains("\"device_id\"")) runCatching {
+            io.github.gscratchpad.platform.SyncState.save(stateFile, state)
+        }
+        return state.deviceId
+    }
+
     private fun cloudUpload() {
         lifecycleScope.launch {
             flushEditor()
@@ -1087,23 +1098,27 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             val cfg = cloudConfig()
-            val res = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                io.github.gscratchpad.platform.CloudBackup.upload(cfg, zip)
+            val name = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                io.github.gscratchpad.platform.CloudBackup.remoteName(cloudDeviceId())
             }
-            android.util.Log.d("Gscratchpad", "cloud upload ${res.ok} ${res.detail} bytes=${zip.length()}")
-            toast(if (res.ok) "已上传 ${zip.length() / 1024} KB（${res.detail}）" else "上传失败：${res.detail}")
+            val res = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                io.github.gscratchpad.platform.CloudBackup.upload(cfg, zip, name)
+            }
+            android.util.Log.d("Gscratchpad", "cloud upload ${res.ok} ${res.detail} name=$name bytes=${zip.length()}")
+            toast(if (res.ok) "已上传 $name（${zip.length() / 1024} KB，${res.detail}）" else "上传失败：${res.detail}")
             zip.delete()
         }
     }
 
-    private fun cloudDownload() {
+    /** 从云端候选 zip 恢复；默认旧固定名，供兼容路径保留。 */
+    private fun cloudDownload(name: String = io.github.gscratchpad.platform.CloudBackup.REMOTE_NAME) {
         lifecycleScope.launch {
             val target = File(cacheDir, "cloud-download-${System.currentTimeMillis()}.zip")
             val cfg = cloudConfig()
             val res = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                io.github.gscratchpad.platform.CloudBackup.download(cfg, target)
+                io.github.gscratchpad.platform.CloudBackup.download(cfg, target, name)
             }
-            android.util.Log.d("Gscratchpad", "cloud download ${res.ok} ${res.detail}")
+            android.util.Log.d("Gscratchpad", "cloud download ${res.ok} ${res.detail} name=$name")
             if (!res.ok) {
                 toast("下载失败：${res.detail}")
                 return@launch
@@ -1111,6 +1126,16 @@ class MainActivity : ComponentActivity() {
             importBackupZip(target, File(cacheDir, "cloud-restore-${System.currentTimeMillis()}"))
             target.delete()
         }
+    }
+
+    /** 列远端备份 zip（新格式 + 旧名），按修改时间倒序。IO 线程调用。 */
+    private fun cloudBackupCandidates(): List<io.github.gscratchpad.platform.DavEntry> {
+        val cfg = cloudConfig()
+        if (!cfg.usable) return emptyList()
+        val dav = io.github.gscratchpad.platform.SyncDav(cfg.baseUrl, cfg.user, cfg.password)
+        return dav.propfindEntries("")
+            .filter { io.github.gscratchpad.platform.CloudBackup.isBackupZip(it.name) }
+            .sortedByDescending { it.modified }
     }
 
     /**
@@ -2211,6 +2236,10 @@ class MainActivity : ComponentActivity() {
         var cloudPassText by remember { mutableStateOf("") }
         var syncEnabled by remember { mutableStateOf(false) }
         var syncLastResult by remember { mutableStateOf("") }
+        // R50：云端备份候选列表
+        var restoreCandidates by remember { mutableStateOf<List<io.github.gscratchpad.platform.DavEntry>>(emptyList()) }
+        var restoreDialogOpen by remember { mutableStateOf(false) }
+        var restoreLoading by remember { mutableStateOf(false) }
         val cloudTicket by cloudDialogTicket.collectAsState()
         LaunchedEffect(cloudTicket) {
             if (cloudTicket > 0) {
@@ -2806,7 +2835,16 @@ class MainActivity : ComponentActivity() {
                                             cloudUrlText.trim(), cloudUserText.trim(), cloudPassText,
                                         )
                                         cloudDialogOpen = false
-                                        cloudDownload()
+                                        restoreLoading = true
+                                        lifecycleScope.launch {
+                                            val list = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                runCatching { cloudBackupCandidates() }.getOrDefault(emptyList())
+                                            }
+                                            restoreCandidates = list
+                                            restoreLoading = false
+                                            restoreDialogOpen = true
+                                            if (list.isEmpty()) toast("云端没有可恢复的备份 zip")
+                                        }
                                     }) { Text("从云端恢复", color = foreground) }
                                     TextButton(onClick = {
                                         saveCloudConfig(
@@ -2818,6 +2856,51 @@ class MainActivity : ComponentActivity() {
                                             if (msg.isNotBlank()) toast(msg)
                                         }
                                     }) { Text("立即同步", color = foreground) }
+                                }
+                            },
+                        )
+                    }
+
+                    // ---- R50：云端备份候选选择（新格式按设备区分 + 旧固定名只读兼容）
+                    if (restoreDialogOpen) {
+                        AlertDialog(
+                            onDismissRequest = { restoreDialogOpen = false },
+                            containerColor = background,
+                            title = {
+                                Text(
+                                    "选择云端备份",
+                                    color = foreground,
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            },
+                            text = {
+                                Column(Modifier.verticalScroll(rememberScrollState())) {
+                                    if (restoreLoading) Text("正在读取云端目录…", color = muted, fontSize = 13.sp)
+                                    if (restoreCandidates.isEmpty()) {
+                                        Text("没有找到可恢复的备份 zip", color = muted, fontSize = 13.sp)
+                                    } else {
+                                        restoreCandidates.forEach { entry ->
+                                            TextButton(
+                                                onClick = {
+                                                    restoreDialogOpen = false
+                                                    cloudDownload(entry.name)
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                            ) {
+                                                Column(Modifier.weight(1f)) {
+                                                    Text(entry.name, color = foreground, fontSize = 14.sp)
+                                                    val size = if (entry.size >= 0) "${entry.size / 1024} KB" else "大小未知"
+                                                    Text("$size · ${entry.modified}", color = muted, fontSize = 11.sp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { restoreDialogOpen = false }) {
+                                    Text("取消", color = foreground)
                                 }
                             },
                         )

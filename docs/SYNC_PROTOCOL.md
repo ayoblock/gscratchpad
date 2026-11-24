@@ -1,6 +1,6 @@
 # GScratchpad 云同步协议（sync v1）
 
-状态：active（2026-11-25） · 适用：桌面 ≥1.17.0 / Android ≥0.9.2 · 传输：WebDAV
+状态：active（2026-11-25） · 适用：桌面 ≥1.17.4 / Android ≥0.9.3 · 传输：WebDAV
 
 > **Android 0.9.1 相对 v1 基线语义的三处调整（用户拍板）**：① 冲突败者由 `recovery/`
 > 纯文本改为**可编辑冲突文档**（§7）；② 冲突裁决由纯 `updated_at` 改为
@@ -19,8 +19,9 @@ Android JVM 单测共用同一组夹具数据）。
 `http://admin@10.42.239.55:5244/dav/hdd/test`）。布局：
 
 ```
-<base>/gscratchpad-desktop.zip          # 桌面自动备份（整包快照，仅桌面写）
-<base>/gscratchpad-cloud.zip            # Android 云备份（R35 现有功能，仅 Android 写）
+<base>/gscratchpad-cloud-<device-id>.zip # 双端整包备份（R50 起，每设备独立、仅该设备写）
+<base>/gscratchpad-cloud.zip            # R35–R49 Android 旧固定名（R50 起只读兼容）
+<base>/gscratchpad-desktop.zip          # R35–R49 桌面旧固定名（R50 起只读兼容）
 <base>/sync/<device-id>/manifest.json   # 该设备全量文档索引（仅该设备写）
 <base>/sync/<device-id>/docs.zip        # 该设备全量正文快照（仅该设备写）
 <base>/sync/<device-id>/assets/<docId>/<name>   # 不可变 blob（仅该设备写）
@@ -28,7 +29,9 @@ Android JVM 单测共用同一组夹具数据）。
 
 核心不变量：**每台设备只写自己的目录，只读别人的**——结构上消灭并发写冲突
 （方案 B 哲学的延伸）。`gscratchpad-*.zip` 备份通道与 sync 通道互不干扰；
-恢复时可导入任一 zip。
+恢复时可导入任一 zip。`<device-id>` 复用 `sync-state.json` 的 `device_id`
+（两端均已稳定生成/持久化）；R50 起「从云端恢复」用 PROPFIND 列出全部候选
+zip（含两个旧固定名），由用户点选后下载导入，不再写死单一文件。
 
 ## 2. manifest.json
 
@@ -170,7 +173,7 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
 
 - 桌面：启动后延迟 15s、内容变更防抖 10s、定时（默认 5 分钟）、窗口关闭前 flush。
 - Android：仅应用打开时（onResume，flush 后触发）；无后台调度（用户拍板）。
-- 自动备份（`gscratchpad-desktop.zip`）：桌面定时默认 30 分钟 + 关闭时，
+- 自动备份（`gscratchpad-cloud-<device-id>.zip`）：桌面定时默认 30 分钟 + 关闭时，
   仅 db fingerprint（文档数 + max(revision,updated_at)）变化时上传。
 
 ## 10. 一致性夹具
@@ -187,11 +190,13 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
   引擎经 `DavOps` 接口解耦以便 JVM 测试注入内存传输）；0.9.1 增量落地冲突文档 /
   deviceId 元组裁决 / 墓碑 90 天清理（见文首三处调整说明）；0.9.2 修正
   `SyncDav` 的 MKCOL/PROPFIND 传输路径（见 §8），新增 `SyncDavRawTest`
-  以本地 HTTP 服务端覆盖这两条非标准方法。
+  以本地 HTTP 服务端覆盖这两条非标准方法；0.9.3 双端统一整包备份命名
+  `gscratchpad-cloud-<device-id>.zip` 并从云端列举点选恢复（见 §2/§9）。
 - 夹具：桌面 `tests/test_sync_merge.py`（SM-01…SM-11）= Android
   `SyncEngineTest` 同名场景，逐字段对应。
-- 已验证：桌面 239 例、Android 227 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
-  tombstone TTL，改 1 例：冲突败者改为可编辑文档；0.9.2 增 `SyncDavRawTest` 2 例）；
+- 已验证：桌面 242 例、Android 230 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
+  tombstone TTL，改 1 例：冲突败者改为可编辑文档；0.9.2 增 `SyncDavRawTest` 2 例；
+  0.9.3 双端各增 `CloudBackupTest` 3 例与 `test_cloud_local` 2 例）；
   真实 AList 服务器
   （`http://10.42.239.55:5244/dav/hdd/test`）双设备 E2E 全过：
   推→拉→互改→冲突 updated_at 新者胜+败者保全→删除传播→删除正文保全。

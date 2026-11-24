@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dataclasses import replace as _replace  # noqa: E402
 
-from scratchpad import backupzip  # noqa: E402
+from scratchpad import backupzip, cloud as cloud_mod  # noqa: E402
 from scratchpad.store import Store  # noqa: E402
 from scratchpad.syncengine import SyncEngine, SyncState  # noqa: E402
 from scratchpad.webdav import WebDavClient, parse_base_url  # noqa: E402
@@ -124,8 +124,23 @@ class _StubDavHandler(BaseHTTPRequestHandler):
             rest = name[len(prefix) + 1 :] if prefix else name
             if rest:
                 children.add(rest.split("/")[0])
-        hrefs = "".join(f"<D:href>/{prefix}/{n}</D:href>" for n in sorted(children))
-        body = f'<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">{hrefs}</D:multistatus>'.encode()
+        responses = []
+        for n in sorted(children):
+            full = f"{prefix}/{n}" if prefix else n
+            with self.lock:
+                size = len(self.store.get(full, b""))
+            responses.append(
+                "<D:response>"
+                f"<D:href>/{full}</D:href><D:propstat><D:prop>"
+                f"<D:getcontentlength>{size}</D:getcontentlength>"
+                "<D:getlastmodified>Tue, 24 Nov 2026 18:00:00 GMT</D:getlastmodified>"
+                "</D:prop></D:propstat></D:response>"
+            )
+        body = (
+            '<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">'
+            + "".join(responses)
+            + "</D:multistatus>"
+        ).encode()
         self.send_response(207)
         self.send_header("Content-Type", "application/xml")
         self.send_header("Content-Length", str(len(body)))
@@ -409,6 +424,45 @@ class CloudLocalTestCase(unittest.TestCase):
         self.assertIn("x1", loaded.deleted)
         self.assertEqual(loaded.own_pushed.get("d"), "H")
         self.assertEqual(json.loads(state_path.read_text())["protocol"], 1)
+
+    # ---------------------------------------------------------- R50 每设备备份名
+    def test_backup_remote_names_and_legacy_compat(self):
+        a = cloud_mod.backup_remote_name("devA")
+        b = cloud_mod.backup_remote_name("devB")
+        self.assertEqual(a, "gscratchpad-cloud-devA.zip")
+        self.assertNotEqual(a, b)
+        for name in (a, cloud_mod.BACKUP_LEGACY_ANDROID, cloud_mod.BACKUP_LEGACY_DESKTOP):
+            self.assertTrue(cloud_mod.is_backup_zip(name))
+        self.assertFalse(cloud_mod.is_backup_zip("notes.md"))
+        self.assertFalse(cloud_mod.is_backup_zip("gscratchpad-cloud-.zip"))
+
+    def test_cloud_manager_backup_list_and_download(self):
+        store = self._store("devA")
+        store.set_meta("webdav_url", self.base_url, wait=True)
+        store.set_meta("webdav_user", "", wait=True)
+        store.set_meta("webdav_pass", AUTH[1], wait=True)
+        manager = cloud_mod.CloudManager(store)
+
+        message = manager.run_backup()
+        self.assertIn("备份完成", message)
+        device_id = manager.backup_device_id()
+        name = cloud_mod.backup_remote_name(device_id)
+        self.assertIn(name, message)
+        self.assertIn(f"dav/test/{name}", _StubDavHandler.store)
+
+        # 旧固定名也列为恢复候选（只读兼容）
+        _StubDavHandler.store["dav/test/gscratchpad-cloud.zip"] = b"legacy"
+        backups = manager.list_remote_backups()
+        names = {item.name for item in backups}
+        self.assertIn(name, names)
+        self.assertIn("gscratchpad-cloud.zip", names)
+        fresh = next(item for item in backups if item.name == name)
+        self.assertGreater(fresh.size, 0)
+        self.assertEqual(fresh.modified, "Tue, 24 Nov 2026 18:00:00 GMT")
+
+        target = self.root / "downloaded.zip"
+        self.assertGreater(manager.download_backup(name, target), 0)
+        self.assertTrue(target.read_bytes().startswith(b"PK"))
 
 
 if __name__ == "__main__":

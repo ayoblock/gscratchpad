@@ -598,6 +598,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                     Command("立即同步", "win.cloud-sync-now", keywords="webdav cloud sync 同步 云 now"),
                     Command("立即备份", "win.cloud-backup-now", keywords="webdav cloud backup 备份 云 now"),
                     Command("导入备份 zip…", "win.cloud-import-backup", keywords="import 导入 备份 恢复 zip"),
+                    Command("从云端恢复…", "win.cloud-restore", keywords="webdav cloud restore 恢复 云端 备份 zip"),
                 ],
             ),
         ]
@@ -714,6 +715,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         add("cloud-sync-now", lambda *_: self.cloud.sync_async())
         add("cloud-backup-now", lambda *_: self.cloud.backup_async())
         add("cloud-import-backup", lambda *_: self.show_cloud_import())
+        add("cloud-restore", lambda *_: self.show_cloud_restore())
         add("toggle-sidebar-autohide", lambda *_: self.toggle_sidebar_autohide())
         add("shortcuts", lambda *_: self.show_shortcuts())
         add("manage-snippets", lambda *_: self.manage_snippets())
@@ -2460,7 +2462,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         toggles = Adw.PreferencesGroup(title="自动任务")
         backup_switch = Adw.SwitchRow(
             title="自动备份",
-            subtitle="每 30 分钟与关闭时上传整包快照 gscratchpad-desktop.zip（内容无变化时跳过）",
+            subtitle="每 30 分钟与关闭时上传整包快照 gscratchpad-cloud-设备ID.zip（内容无变化时跳过）",
         )
         backup_switch.set_active(CloudManager.autobackup_enabled(self.store))
         sync_switch = Adw.SwitchRow(
@@ -2479,6 +2481,8 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         backup_now_row.add_suffix(self._cloud_button("备份", lambda: self.cloud.backup_async()))
         import_row = Adw.ActionRow(title="导入备份 zip（合并导入，不覆盖本地较新内容）")
         import_row.add_suffix(self._cloud_button("选择…", self.show_cloud_import))
+        restore_row = Adw.ActionRow(title="从云端恢复", subtitle="列出远端各设备备份 zip 后选择下载")
+        restore_row.add_suffix(self._cloud_button("选择…", self.show_cloud_restore))
         last_sync = self.store.get_meta("cloud_sync_at", "")
         last_backup = self.store.get_meta("cloud_backup_at", "")
         status_row = Adw.ActionRow(
@@ -2489,7 +2493,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                 else "尚未执行"
             ),
         )
-        for row in (sync_now_row, backup_now_row, import_row, status_row):
+        for row in (sync_now_row, backup_now_row, import_row, restore_row, status_row):
             status_group.add(row)
         page.add(status_group)
         win.add(page)
@@ -2565,7 +2569,71 @@ class ScratchpadWindow(Adw.ApplicationWindow):
             return
         if file is None or not file.get_path():
             return
-        zip_path = Path(file.get_path())
+        self._import_backup_zip(Path(file.get_path()))
+
+    def show_cloud_restore(self) -> None:
+        """列远端备份 zip → 选择后下载并合并导入（新格式按设备区分 + 旧名兼容）。"""
+        import threading as _threading
+
+        def worker() -> None:
+            try:
+                backups = self.cloud.list_remote_backups()
+            except Exception as exc:  # noqa: BLE001
+                GLib.idle_add(self._on_cloud_status, f"列云端备份失败：{exc}")
+                return
+            GLib.idle_add(self._show_cloud_restore_dialog, backups)
+
+        _threading.Thread(target=worker, name="gsp-cloud-list", daemon=True).start()
+
+    def _show_cloud_restore_dialog(self, backups) -> None:
+        if not backups:
+            self._on_cloud_status("云端没有可恢复的备份 zip")
+            return
+        dialog = Gtk.Dialog(title="从云端恢复", transient_for=self, modal=True)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("下载并恢复", Gtk.ResponseType.ACCEPT)
+        content = dialog.get_content_area()
+        content.append(
+            Gtk.Label(label="选择远端备份 zip（合并导入，不覆盖本地较新内容）")
+        )
+        labels = [
+            f"{item.name}  ·  {item.size // 1024 if item.size >= 0 else '?'} KB  ·  {item.modified}"
+            for item in backups
+        ]
+        dropdown = Gtk.DropDown(model=Gtk.StringList.new(labels))
+        content.append(dropdown)
+        dialog.show()
+
+        def on_response(_dlg, response) -> None:
+            if response == Gtk.ResponseType.ACCEPT:
+                index = dropdown.get_selected()
+                if 0 <= index < len(backups):
+                    self._download_and_import(backups[index].name)
+            dialog.destroy()
+
+        dialog.connect("response", on_response)
+
+    def _download_and_import(self, name: str) -> None:
+        import os
+        import tempfile
+        import threading as _threading
+
+        fd, raw = tempfile.mkstemp(prefix="gs-cloud-restore-", suffix=".zip")
+        os.close(fd)
+        target = Path(raw)
+
+        def worker() -> None:
+            try:
+                size = self.cloud.download_backup(name, target)
+                GLib.idle_add(self._on_cloud_status, f"已下载 {name}（{size} B），开始导入")
+                self._import_backup_zip(target, cleanup=True)
+            except Exception as exc:  # noqa: BLE001
+                target.unlink(missing_ok=True)
+                GLib.idle_add(self._on_cloud_status, f"下载云端备份失败：{exc}")
+
+        _threading.Thread(target=worker, name="gsp-cloud-download", daemon=True).start()
+
+    def _import_backup_zip(self, zip_path: Path, cleanup: bool = False) -> None:
         assets_dir = paths.data_root() / "assets"
 
         def worker() -> None:
@@ -2597,6 +2665,9 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                 )
             except Exception as exc:  # noqa: BLE001
                 self._on_cloud_status(f"导入失败：{exc}")
+            finally:
+                if cleanup:
+                    zip_path.unlink(missing_ok=True)
 
         import threading as _threading
 

@@ -10,7 +10,8 @@ import java.util.Base64
  * 云备份（Q5）：两条通道，均为「用户自带目的地」，应用自身不引入账号体系。
  *
  * 1. **WebDAV**：`PUT/GET/HEAD` 一个 zip。地址填到目录级，例如
- *    `https://dav.example.com/remote.php/dav/files/alice/`，文件名固定 [_REMOTE_NAME]。
+ *    `https://dav.example.com/remote.php/dav/files/alice/`。R50 起文件名按设备区分：
+ *    `gscratchpad-cloud-<device-id>.zip`；[REMOTE_NAME] 仅作为旧版只读兼容名。
  * 2. **云盘目录（SAF）**：用户在系统文件选择器里选一个由云盘 DocumentsProvider 提供的目录，
  *    由 `MainActivity` 用 `DocumentsContract` 写入/读取同一个 zip。
  *
@@ -19,14 +20,25 @@ import java.util.Base64
  */
 object CloudBackup {
 
+    /** R35–R49 的旧固定名：恢复时仍可读取，上传不再写入。 */
     const val REMOTE_NAME = "gscratchpad-cloud.zip"
+    /** 桌面端 R35 起的旧固定名：同为只读兼容候选。 */
+    const val DESKTOP_LEGACY_NAME = "gscratchpad-desktop.zip"
+    const val NAME_PREFIX = "gscratchpad-cloud-"
+
+    /** R50 起每台设备独立文件名，避免多设备互相覆盖。 */
+    fun remoteName(deviceId: String): String = "$NAME_PREFIX$deviceId.zip"
+
+    /** 旧名与新格式 zip 均可作为恢复候选。 */
+    fun isBackupZip(name: String): Boolean =
+        name == REMOTE_NAME || name == DESKTOP_LEGACY_NAME ||
+            (name.startsWith(NAME_PREFIX) && name.endsWith(".zip") && name.length > NAME_PREFIX.length + 4)
 
     data class Config(val baseUrl: String, val user: String, val password: String) {
-        val remoteUrl: String
-            get() {
-                val base = baseUrl.trim().trimEnd('/')
-                return "$base/$REMOTE_NAME"
-            }
+        fun remoteUrl(name: String = REMOTE_NAME): String {
+            val base = baseUrl.trim().trimEnd('/')
+            return "$base/$name"
+        }
 
         val usable: Boolean get() = baseUrl.startsWith("http")
     }
@@ -39,12 +51,12 @@ object CloudBackup {
         return "Basic $token"
     }
 
-    /** 上传：成功返回 `200/201/204` 之一。 */
-    fun upload(cfg: Config, file: File): Result2 {
+    /** 上传：成功返回 `200/201/204` 之一。R50 起调用方须传设备专属文件名。 */
+    fun upload(cfg: Config, file: File, name: String = REMOTE_NAME): Result2 {
         if (!cfg.usable) return Result2(false, "地址需以 http(s) 开头")
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(cfg.remoteUrl).openConnection() as HttpURLConnection).apply {
+            conn = (URL(cfg.remoteUrl(name)).openConnection() as HttpURLConnection).apply {
                 requestMethod = "PUT"
                 doOutput = true
                 connectTimeout = 12_000
@@ -67,7 +79,7 @@ object CloudBackup {
         if (!cfg.usable) return -1
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(cfg.remoteUrl).openConnection() as HttpURLConnection).apply {
+            conn = (URL(cfg.remoteUrl()).openConnection() as HttpURLConnection).apply {
                 requestMethod = "HEAD"
                 connectTimeout = 8_000
                 readTimeout = 12_000
@@ -81,12 +93,12 @@ object CloudBackup {
         }
     }
 
-    /** 下载到 [target]，返回结果与字节数。 */
-    fun download(cfg: Config, target: File): Result2 {
+    /** 下载到 [target]；[name] 为云端候选文件名（新格式或旧固定名）。 */
+    fun download(cfg: Config, target: File, name: String = REMOTE_NAME): Result2 {
         if (!cfg.usable) return Result2(false, "地址需以 http(s) 开头")
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(cfg.remoteUrl).openConnection() as HttpURLConnection).apply {
+            conn = (URL(cfg.remoteUrl(name)).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 12_000
                 readTimeout = 30_000

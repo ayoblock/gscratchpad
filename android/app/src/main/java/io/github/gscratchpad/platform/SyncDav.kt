@@ -305,32 +305,61 @@ class SyncDav(baseUrl: String, user: String, password: String) : DavOps {
         }
     }
 
+    private fun dirUrl(path: String): String =
+        if (path.trim('/').isEmpty()) joinUrl(base, "") else joinUrl(base, path) + "/"
+
     /** Depth:1 枚举子项名（URL 解码后，排除自身）。404 返回空列表。 */
-    override fun propfindChildren(path: String): List<String> {
+    override fun propfindChildren(path: String): List<String> =
+        propfindEntries(path).map { it.name }
+
+    /** Depth:1 枚举子项（含大小与修改时间），供云端备份列表使用。 */
+    fun propfindEntries(path: String): List<DavEntry> {
         val body = """
             <?xml version="1.0" encoding="utf-8"?>
-            <D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>
+            <D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/></D:prop></D:propfind>
         """.trimIndent().toByteArray()
-        val url = joinUrl(base, path) + "/"
+        val url = dirUrl(path)
         val (code, data) = requestRetry("PROPFIND", url, body, "application/xml")
         if (code == 404) return emptyList()
         if (code !in 200..299 && code != 207) {
             throw SyncDavException("列目录失败 HTTP $code", code)
         }
-        return parsePropfindNames(String(data, Charsets.UTF_8), path.trim('/').substringAfterLast('/'))
+        return parsePropfindEntries(String(data, Charsets.UTF_8), path.trim('/').substringAfterLast('/'))
     }
 }
+
+/** PROPFIND 子项：名称、字节数（-1 表示服务端未给）、最后修改时间原文。 */
+data class DavEntry(val name: String, val size: Long = -1, val modified: String = "")
 
 class SyncDavException(message: String, val status: Int = 0) : IOException(message)
 
 /** multistatus → 子项名列表（命名空间无关，正则提取 href）。 */
-internal fun parsePropfindNames(xmlText: String, selfName: String): List<String> {
-    val names = mutableListOf<String>()
-    val regex = Regex("<(?:[A-Za-z0-9]+:)?href>(.*?)</(?:[A-Za-z0-9]+:)?href>")
-    for (match in regex.findAll(xmlText)) {
-        val href = java.net.URLDecoder.decode(match.groupValues[1].trim(), "UTF-8")
-        val name = href.trimEnd('/').substringAfterLast('/')
-        if (name.isNotEmpty() && name != selfName) names.add(name)
+internal fun parsePropfindNames(xmlText: String, selfName: String): List<String> =
+    parsePropfindEntries(xmlText, selfName).map { it.name }
+
+/** multistatus → 子项（名称/大小/修改时间），命名空间无关。 */
+internal fun parsePropfindEntries(xmlText: String, selfName: String): List<DavEntry> {
+    val out = mutableListOf<DavEntry>()
+    val responses = Regex(
+        "<(?:[A-Za-z0-9]+:)?response\\b[^>]*>(.*?)</(?:[A-Za-z0-9]+:)?response>",
+        RegexOption.DOT_MATCHES_ALL,
+    )
+    fun tag(block: String, name: String): String? = Regex(
+        "<(?:[A-Za-z0-9]+:)?$name\\b[^>]*>(.*?)</(?:[A-Za-z0-9]+:)?$name>",
+        RegexOption.DOT_MATCHES_ALL,
+    ).find(block)?.groupValues?.get(1)?.trim()
+    for (match in responses.findAll(xmlText)) {
+        val block = match.groupValues[1]
+        val href = tag(block, "href") ?: continue
+        val name = java.net.URLDecoder.decode(href.trim(), "UTF-8").trimEnd('/').substringAfterLast('/')
+        if (name.isEmpty() || name == selfName) continue
+        out.add(
+            DavEntry(
+                name = name,
+                size = tag(block, "getcontentlength")?.toLongOrNull() ?: -1,
+                modified = tag(block, "getlastmodified") ?: "",
+            ),
+        )
     }
-    return names
+    return out
 }

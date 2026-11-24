@@ -6,22 +6,47 @@
 
 调度策略（docs/SYNC_PROTOCOL.md §9）：
 - 自动备份：默认 30 分钟 + 关闭时；仅 fingerprint 变化时上传
-  `gscratchpad-desktop.zip`。
+  `gscratchpad-cloud-<device-id>.zip`（R50 起双端统一命名）。
 - 自动同步：默认 5 分钟；启动延迟 15s、内容变更防抖 10s、关闭时 flush。
 - Android 端仅应用打开时同步（无后台调度）。
 """
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import backupzip
 from .syncengine import SyncEngine, SyncState
 from .webdav import WebDavClient, WebDavError, parse_base_url
 
-BACKUP_REMOTE = "gscratchpad-desktop.zip"
+# R50 起双端统一命名；旧固定名仅作为只读恢复候选。
+BACKUP_PREFIX = "gscratchpad-cloud-"
+BACKUP_LEGACY_DESKTOP = "gscratchpad-desktop.zip"
+BACKUP_LEGACY_ANDROID = "gscratchpad-cloud.zip"
+BACKUP_REMOTE = BACKUP_LEGACY_DESKTOP  # 兼容旧引用；上传不再使用
+
+
+def backup_remote_name(device_id: str) -> str:
+    return f"{BACKUP_PREFIX}{device_id}.zip"
+
+
+def is_backup_zip(name: str) -> bool:
+    return (
+        name in (BACKUP_LEGACY_DESKTOP, BACKUP_LEGACY_ANDROID)
+        or (name.startswith(BACKUP_PREFIX) and name.endswith(".zip") and len(name) > len(BACKUP_PREFIX) + 4)
+    )
+
+
+@dataclass(frozen=True)
+class RemoteBackup:
+    name: str
+    size: int = -1
+    modified: str = ""
 BACKUP_INTERVAL_DEFAULT = 30 * 60
 SYNC_INTERVAL_DEFAULT = 5 * 60
 STARTUP_DELAY = 15.0
@@ -144,6 +169,49 @@ class CloudManager:
             self.config_password(),
         )
 
+    # ---------------------------------------------------------------- 备份文件
+
+    def backup_device_id(self) -> str:
+        """复用同步 device_id；未启用同步的设备也生成并落盘一次。"""
+        state_path = Path(self.store.root) / "sync-state.json"
+        state = SyncState.load(state_path)
+        raw = ""
+        try:
+            if state_path.exists():
+                raw = state_path.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
+        if '"device_id"' not in raw:
+            try:
+                state.save(state_path)
+            except OSError:
+                pass
+        return state.device_id
+
+    def backup_remote_name(self) -> str:
+        return backup_remote_name(self.backup_device_id())
+
+    def list_remote_backups(self) -> list[RemoteBackup]:
+        """列远端备份 zip（新格式 + 旧名），按修改时间倒序。"""
+        client = self._client()
+        if client is None:
+            return []
+        return [
+            RemoteBackup(name=name, size=size, modified=modified)
+            for name, size, modified in client.propfind_entries("")
+            if is_backup_zip(name)
+        ]
+
+    def download_backup(self, name: str, target: Path) -> int:
+        """下载指定远端备份 zip 到本地，返回字节数。"""
+        client = self._client()
+        if client is None:
+            raise WebDavError("未配置 WebDAV 地址")
+        data = client.get(name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return len(data)
+
     def save_config(
         self,
         url: str,
@@ -216,10 +284,11 @@ class CloudManager:
                 )
                 if report.errors:
                     return f"备份失败：{report.errors[0]}"
-                client.put(BACKUP_REMOTE, (tmp / "out.zip").read_bytes(), "application/zip")
+                name = self.backup_remote_name()
+                client.put(name, (tmp / "out.zip").read_bytes(), "application/zip")
                 self.store.set_meta("cloud_backup_fp", fp)
                 self.store.set_meta("cloud_backup_at", str(time.time()))
-                return f"备份完成：{report.bytes_written} B"
+                return f"备份完成：{report.bytes_written} B → {name}"
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
 
