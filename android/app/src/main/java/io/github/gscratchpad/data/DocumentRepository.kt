@@ -8,6 +8,7 @@ import io.github.gscratchpad.domain.model.MaintenanceReport
 import io.github.gscratchpad.domain.model.PurgeReport
 import io.github.gscratchpad.platform.FolderPolicy
 import io.github.gscratchpad.platform.MaintenancePolicy
+import io.github.gscratchpad.platform.SyncState
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -158,6 +159,7 @@ class DocumentRepositoryImpl(
         dao.delete(id)
         mirror.delete(id)
         assets.delete(id)
+        recordTombstone(id)
         // 清掉指向该文档的 meta 指针
         val stale = mutableListOf<String>()
         dao.getMeta(MetaKeys.ACTIVE_DOC)?.let { if (it == id) stale.add(MetaKeys.ACTIVE_DOC) }
@@ -187,8 +189,22 @@ class DocumentRepositoryImpl(
                 report.errors.add("${doc.id}: ${e.message}")
             }
         }
+        recordTombstones(ids)
         bump()
         report
+    }
+
+    /** sync v1：本地删除 → 墓碑登记（失败不阻断删除；引擎 push 阶段另有兜底发现）。 */
+    private fun recordTombstone(id: String) = recordTombstones(setOf(id))
+
+    private fun recordTombstones(ids: Set<String>) {
+        if (ids.isEmpty()) return
+        runCatching {
+            val stateFile = File(paths.root, "sync-state.json")
+            val state = SyncState.load(stateFile)
+            ids.forEach { state.addDeleted(it) }
+            SyncState.save(stateFile, state)
+        }
     }
 
     // ------------------------------------------------------------------ R39 维护

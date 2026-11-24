@@ -95,9 +95,11 @@ import io.github.gscratchpad.platform.FoldersScreen
 import io.github.gscratchpad.platform.OpenPolicy
 import io.github.gscratchpad.platform.SafFileGateway
 import io.github.gscratchpad.platform.SaveAsPolicy
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -238,6 +240,16 @@ class MainActivity : ComponentActivity() {
         attachEditorPanelIfNeeded()
         // 从系统授权页返回后刷新「所有文件访问」状态（File 直读工作目录依赖此权限）
         allFilesGranted.value = allFilesAccessGranted()
+        // sync v1：仅应用打开时同步（用户拍板，无后台调度）
+        if (cloudPrefs().getBoolean("sync_enabled", false)) {
+            lifecycleScope.launch {
+                runCatching { flushEditor() }
+                val msg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCloudSync()
+                }
+                if (msg.isNotBlank()) toast(msg)
+            }
+        }
     }
 
     // ---- 共享存储访问辅助方法（R42：API 30+ 走 MANAGE_EXTERNAL_STORAGE，API 29- 走传统 READ）
@@ -1099,6 +1111,23 @@ class MainActivity : ComponentActivity() {
             importBackupZip(target, File(cacheDir, "cloud-restore-${System.currentTimeMillis()}"))
             target.delete()
         }
+    }
+
+    /**
+     * sync v1：单次同步（IO 线程调用，与桌面 syncengine.py 语义一致）。
+     * 返回给用户的提示；成功且零操作返回空串（不打扰）。
+     */
+    private fun runCloudSync(): String {
+        val cfg = cloudConfig()
+        if (!cfg.usable) return "云同步未配置 WebDAV 地址"
+        val dav = io.github.gscratchpad.platform.SyncDav(cfg.baseUrl, cfg.user, cfg.password)
+        val engine = io.github.gscratchpad.platform.SyncEngine(container.dao, container.paths, dav)
+        val result = engine.run()
+        cloudPrefs().edit { putString("sync_last_result", result.message) }
+        android.util.Log.d("Gscratchpad", "sync ok=${result.ok} ${result.message}")
+        val quiet = result.ok && result.applied == 0 && result.deleted == 0 &&
+            result.conflicts == 0 && result.pushedDocs == 0
+        return if (quiet) "" else result.message
     }
 
     /**
@@ -2180,6 +2209,8 @@ class MainActivity : ComponentActivity() {
         var cloudUrlText by remember { mutableStateOf("") }
         var cloudUserText by remember { mutableStateOf("") }
         var cloudPassText by remember { mutableStateOf("") }
+        var syncEnabled by remember { mutableStateOf(false) }
+        var syncLastResult by remember { mutableStateOf("") }
         val cloudTicket by cloudDialogTicket.collectAsState()
         LaunchedEffect(cloudTicket) {
             if (cloudTicket > 0) {
@@ -2187,6 +2218,8 @@ class MainActivity : ComponentActivity() {
                 cloudUrlText = cfg.baseUrl
                 cloudUserText = cfg.user
                 cloudPassText = cfg.password
+                syncEnabled = cloudPrefs().getBoolean("sync_enabled", false)
+                syncLastResult = cloudPrefs().getString("sync_last_result", "") ?: ""
                 cloudDialogOpen = true
             }
         }
@@ -2715,6 +2748,32 @@ class MainActivity : ComponentActivity() {
                                         visualTransformation = PasswordVisualTransformation(),
                                         colors = fieldColors,
                                     )
+                                    // ---- R48：多端同步——自动同步开关（打开应用时触发）
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            "自动同步（打开应用时）",
+                                            color = foreground,
+                                            fontSize = 14.sp,
+                                        )
+                                        Switch(
+                                            checked = syncEnabled,
+                                            onCheckedChange = { checked ->
+                                                syncEnabled = checked
+                                                cloudPrefs().edit { putBoolean("sync_enabled", checked) }
+                                            },
+                                        )
+                                    }
+                                    if (syncLastResult.isNotBlank()) {
+                                        Text(
+                                            syncLastResult,
+                                            color = muted,
+                                            fontSize = 12.sp,
+                                        )
+                                    }
                                 }
                             },
                             confirmButton = {
@@ -2749,6 +2808,16 @@ class MainActivity : ComponentActivity() {
                                         cloudDialogOpen = false
                                         cloudDownload()
                                     }) { Text("从云端恢复", color = foreground) }
+                                    TextButton(onClick = {
+                                        saveCloudConfig(
+                                            cloudUrlText.trim(), cloudUserText.trim(), cloudPassText,
+                                        )
+                                        cloudDialogOpen = false
+                                        lifecycleScope.launch {
+                                            val msg = withContext(Dispatchers.IO) { runCloudSync() }
+                                            if (msg.isNotBlank()) toast(msg)
+                                        }
+                                    }) { Text("立即同步", color = foreground) }
                                 }
                             },
                         )

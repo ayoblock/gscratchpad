@@ -19,6 +19,14 @@ gi.require_version("WebKit", "6.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import assets, columnedit, keymap, paths, snippets  # noqa: E402
+from . import backupzip  # noqa: E402
+from .cloud import (  # noqa: E402
+    BACKUP_INTERVAL_DEFAULT,
+    CHANGE_DEBOUNCE,
+    STARTUP_DELAY,
+    SYNC_INTERVAL_DEFAULT,
+    CloudManager,
+)
 from .command_menu import Command, CommandMenu, CommandSection, format_accel  # noqa: E402
 from .editor import MODE_PREVIEW, MODE_SOURCE, MODE_SPLIT, EditorPage  # noqa: E402
 
@@ -114,6 +122,14 @@ def _read_text_file(path: Path) -> str:
     return data.decode("latin-1", errors="replace")
 
 
+def _cloud_time(raw: str) -> str:
+    """meta 里的执行时间戳 → 本地时间短串；空/无效返回占位。"""
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(float(raw)))
+    except (TypeError, ValueError):
+        return "—"
+
+
 class ScratchpadWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application, store: Store) -> None:
         super().__init__(application=application)
@@ -138,6 +154,12 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         self._snippet_actions: list[str] = []
         self._snippets_dialog = None
         self._snippet_editor = None
+        # 云备份 / 云同步（sync v1）：管理器 + 定时器；墓碑由 store 删除事件驱动
+        self.cloud = CloudManager(self.store)
+        self._cloud_debounce_timer: int | None = None
+        self.cloud.on_status = self._on_cloud_status
+        # 保存状态回调在写线程内触发 → 转投主循环，再操作 GLib 定时器
+        self.store.on_save_state(lambda _s: GLib.idle_add(self._cloud_touch))
 
         style = Adw.StyleManager.get_default()
         style.connect("notify::dark", self._on_theme_changed)
@@ -147,6 +169,11 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         self._init_snippets()
         self._apply_color_scheme(self.store.get_meta("color_scheme", "default"), persist=False)
         self._restore_geometry()
+
+        # 云调度定时器：启动延迟 / 同步周期 / 备份周期（回调内部检查开关与配置）
+        GLib.timeout_add_seconds(int(STARTUP_DELAY), self._on_cloud_startup_tick)
+        GLib.timeout_add_seconds(int(SYNC_INTERVAL_DEFAULT), self._on_cloud_sync_tick)
+        GLib.timeout_add_seconds(int(BACKUP_INTERVAL_DEFAULT), self._on_cloud_backup_tick)
 
         # Ctrl+F / Ctrl+H 三重保险：
         # 1) 窗口 capture 阶段直接调 show_search，不经过 action muxer；
@@ -557,6 +584,10 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                     Command("片段与自动补全…", "win.manage-snippets", keywords="snippet 片段 补全 快捷键"),
                     Command("清除已关闭的笔记…", "win.purge-closed", keywords="purge 清除 已关闭 回收 清理 历史"),
                     Command("清理孤儿文件并压缩数据库…", "win.maintenance", keywords="maintenance 清理 孤儿 vacuum 压缩 数据库 空间"),
+                    Command("云同步设置…", "win.cloud-sync-settings", keywords="webdav cloud sync 同步 云 备份 设置"),
+                    Command("立即同步", "win.cloud-sync-now", keywords="webdav cloud sync 同步 云 now"),
+                    Command("立即备份", "win.cloud-backup-now", keywords="webdav cloud backup 备份 云 now"),
+                    Command("导入备份 zip…", "win.cloud-import-backup", keywords="import 导入 备份 恢复 zip"),
                 ],
             ),
         ]
@@ -669,6 +700,10 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         add("delete-doc", lambda *_: self.delete_current_document())
         add("purge-closed", lambda *_: self.purge_closed_documents())
         add("maintenance", lambda *_: self.run_maintenance())
+        add("cloud-sync-settings", lambda *_: self.show_cloud_settings())
+        add("cloud-sync-now", lambda *_: self.cloud.sync_async())
+        add("cloud-backup-now", lambda *_: self.cloud.backup_async())
+        add("cloud-import-backup", lambda *_: self.show_cloud_import())
         add("toggle-sidebar-autohide", lambda *_: self.toggle_sidebar_autohide())
         add("shortcuts", lambda *_: self.show_shortcuts())
         add("manage-snippets", lambda *_: self.manage_snippets())
@@ -2387,6 +2422,176 @@ class ScratchpadWindow(Adw.ApplicationWindow):
             return
         self._delete_document_now(page.doc_id)
 
+    # ================================================================== 云同步设置与备份导入
+
+    def show_cloud_settings(self) -> None:
+        """WebDAV / 自动备份 / 同步设置（Adw.PreferencesWindow，即改即存）。"""
+        win = Adw.PreferencesWindow(transient_for=self, modal=True)
+        win.set_title("云同步设置")
+        win.set_default_size(620, 520)
+        self._cloud_dialog = win  # 防 GC
+
+        page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(
+            title="WebDAV 服务器",
+            description="与 Android 端「云备份」可共用同一地址；同步按设备目录隔离，互不覆盖。",
+        )
+        url_row = Adw.EntryRow(title="服务器地址（目录级）")
+        url_row.set_text(self.cloud.config_url())
+        user_row = Adw.EntryRow(title="用户名（地址含 user@ 时可留空）")
+        user_row.set_text(self.store.get_meta("webdav_user", "") or "")
+        pass_row = Adw.PasswordEntryRow(title="密码")
+        pass_row.set_text(self.cloud.config_password())
+        group.add(url_row)
+        group.add(user_row)
+        group.add(pass_row)
+        page.add(group)
+
+        toggles = Adw.PreferencesGroup(title="自动任务")
+        backup_switch = Adw.SwitchRow(
+            title="自动备份",
+            subtitle="每 30 分钟与关闭时上传整包快照 gscratchpad-desktop.zip（内容无变化时跳过）",
+        )
+        backup_switch.set_active(CloudManager.autobackup_enabled(self.store))
+        sync_switch = Adw.SwitchRow(
+            title="自动同步",
+            subtitle="每 5 分钟、启动后与内容变更防抖后双向同步；冲突败者保全到 recovery/",
+        )
+        sync_switch.set_active(CloudManager.autosync_enabled(self.store))
+        toggles.add(backup_switch)
+        toggles.add(sync_switch)
+        page.add(toggles)
+
+        status_group = Adw.PreferencesGroup(title="手动操作与状态")
+        sync_now_row = Adw.ActionRow(title="立即同步")
+        sync_now_row.add_suffix(self._cloud_button("同步", lambda: self.cloud.sync_async()))
+        backup_now_row = Adw.ActionRow(title="立即备份")
+        backup_now_row.add_suffix(self._cloud_button("备份", lambda: self.cloud.backup_async()))
+        import_row = Adw.ActionRow(title="导入备份 zip（合并导入，不覆盖本地较新内容）")
+        import_row.add_suffix(self._cloud_button("选择…", self.show_cloud_import))
+        last_sync = self.store.get_meta("cloud_sync_at", "")
+        last_backup = self.store.get_meta("cloud_backup_at", "")
+        status_row = Adw.ActionRow(
+            title="上次执行",
+            subtitle=(
+                f"同步 {_cloud_time(last_sync)} · 备份 {_cloud_time(last_backup)}"
+                if (last_sync or last_backup)
+                else "尚未执行"
+            ),
+        )
+        for row in (sync_now_row, backup_now_row, import_row, status_row):
+            status_group.add(row)
+        page.add(status_group)
+        win.add(page)
+
+        def apply_url_user(*_a) -> None:
+            try:
+                self.cloud.save_config(
+                    url_row.get_text(),
+                    user_row.get_text(),
+                    "",  # 密码单独在关闭时保存
+                    remember_in_meta=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.toast_overlay.add_toast(Adw.Toast(title=f"地址无效：{exc}", timeout=4))
+
+        url_row.connect("changed", self._cloud_row_debounced(apply_url_user))
+        user_row.connect("changed", self._cloud_row_debounced(apply_url_user))
+        backup_switch.connect(
+            "notify::active",
+            lambda *_: self.cloud.set_enabled(autobackup=backup_switch.get_active()),
+        )
+        sync_switch.connect(
+            "notify::active",
+            lambda *_: self.cloud.set_enabled(autosync=sync_switch.get_active()),
+        )
+
+        def on_close(_w) -> bool:
+            password = pass_row.get_text()
+            self.cloud.save_config(
+                url_row.get_text(),
+                user_row.get_text(),
+                password,
+                remember_in_meta=True,
+            )
+            return False
+
+        win.connect("close-request", on_close)
+        win.present()
+        self._cloud_dialog_built = True  # 测试断言：对话框构建完整走完
+
+    @staticmethod
+    def _cloud_row_debounced(callback, delay_ms: int = 600):
+        state = {"id": None}
+
+        def inner(*_a) -> None:
+            if state["id"] is not None:
+                GLib.source_remove(state["id"])
+            state["id"] = GLib.timeout_add(delay_ms, lambda: (callback(), False)[1])
+
+        return inner
+
+    @staticmethod
+    def _cloud_button(label: str, handler) -> Gtk.Button:
+        button = Gtk.Button(label=label, valign=Gtk.Align.CENTER, css_classes=["flat"])
+        button.connect("clicked", lambda *_: handler())
+        return button
+
+    def show_cloud_import(self) -> None:
+        """选择备份 zip → 后台合并导入（不覆盖本地较新内容）。"""
+        dialog = Gtk.FileDialog(title="选择备份 zip")
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name("备份包 (*.zip)")
+        file_filter.add_pattern("*.zip")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(file_filter)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._on_cloud_import_chosen, None)
+
+    def _on_cloud_import_chosen(self, dialog, result, _data) -> None:
+        try:
+            file = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        if file is None or not file.get_path():
+            return
+        zip_path = Path(file.get_path())
+        assets_dir = paths.data_root() / "assets"
+
+        def worker() -> None:
+            try:
+                report, items = backupzip.import_backup_zip(zip_path, assets_dir=assets_dir)
+                if report.errors:
+                    self._on_cloud_status(f"导入失败：{report.errors[0]}")
+                    return
+                local_revs = self.store.local_revisions()
+                applied = skipped = metas = 0
+                folders: list[tuple[str, float]] = []
+                for item in items:
+                    if "meta_key" in item:
+                        self.store.set_meta(item["meta_key"], item["meta_value"])
+                        metas += 1
+                        continue
+                    local_rev = local_revs.get(item["id"])
+                    if local_rev is not None and local_rev >= int(item["revision"]):
+                        skipped += 1
+                        continue
+                    self.store.apply_remote(item)
+                    if item.get("folder"):
+                        folders.append((item["folder"], float(item.get("created_at", 0.0))))
+                    applied += 1
+                self.store.merge_folders(folders)
+                self._on_cloud_status(
+                    f"导入完成：应用 {applied}，冲突跳过 {skipped}，"
+                    f"资源 {report.assets_imported}，meta {metas}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._on_cloud_status(f"导入失败：{exc}")
+
+        import threading as _threading
+
+        _threading.Thread(target=worker, name="gsp-import", daemon=True).start()
+
     # ================================================================== 清理与维护
 
     def toggle_sidebar_autohide(self) -> None:
@@ -2608,7 +2813,66 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                 self._save_page(page, wait=True)
         self._persist_session()
         self.store.flush()
+        if self.cloud is not None:
+            # 关闭前推送（规约 §9）：同步 + 备份，阻塞式尽力而为
+            self.cloud.close_flush()
         self.store.close()
         return False  # 允许关闭
+
+    # ------------------------------------------------------------------ 云备份 / 云同步
+
+    def _on_cloud_status(self, text: str) -> None:
+        """云任务状态回调（工作线程内触发）→ 主线程 toast。"""
+        def show() -> bool:
+            self.toast_overlay.add_toast(Adw.Toast(title=text, timeout=5))
+            return False
+        GLib.idle_add(show)
+
+    def _cloud_touch(self) -> None:
+        """内容保存后防抖触发同步（主线程内调用）。"""
+        if self._closing or not CloudManager.autosync_enabled(self.store):
+            return
+        if self._cloud_debounce_timer is not None:
+            GLib.source_remove(self._cloud_debounce_timer)
+        self._cloud_debounce_timer = GLib.timeout_add_seconds(
+            int(CHANGE_DEBOUNCE), self._on_cloud_debounce_fire
+        )
+
+    def _on_cloud_debounce_fire(self) -> bool:
+        self._cloud_debounce_timer = None
+        if (
+            not self._closing
+            and CloudManager.autosync_enabled(self.store)
+            and self.cloud.config_url()
+        ):
+            self.cloud.sync_async()
+        return False
+
+    def _on_cloud_startup_tick(self) -> bool:
+        if (
+            not self._closing
+            and CloudManager.autosync_enabled(self.store)
+            and self.cloud.config_url()
+        ):
+            self.cloud.sync_async()
+        return False
+
+    def _on_cloud_sync_tick(self) -> bool:
+        if (
+            not self._closing
+            and CloudManager.autosync_enabled(self.store)
+            and self.cloud.config_url()
+        ):
+            self.cloud.sync_async()
+        return True
+
+    def _on_cloud_backup_tick(self) -> bool:
+        if (
+            not self._closing
+            and CloudManager.autobackup_enabled(self.store)
+            and self.cloud.config_url()
+        ):
+            self.cloud.backup_async()
+        return True
 
 

@@ -161,6 +161,49 @@ class DocumentDao(private val db: SqlDb) {
         return true
     }
 
+    /**
+     * sync v1：远端文档应用（唯一入口，语义与桌面 `store.apply_sync` 一致）。
+     * 本地已存在时 revision 取 max(local, incoming)+1，其余字段以 incoming 为准
+     * （含 updated_at，保持对端时序用于后续冲突判定）；folder 登记进 folders 表。
+     */
+    fun applyRemote(
+        id: String,
+        title: String,
+        format: Format,
+        content: String,
+        sortIndex: Int,
+        state: DocState,
+        revision: Long,
+        createdAt: Double,
+        updatedAt: Double,
+        folder: String,
+    ) {
+        db.transaction {
+            val before = revisionOf(id)
+            if (before != null) {
+                val newRev = maxOf(before, revision) + 1
+                db.exec(
+                    "UPDATE documents SET title=?, format=?, content=?, sort_index=?, state=?," +
+                        " revision=?, created_at=?, updated_at=?, folder=? WHERE id=?",
+                    listOf(title, format.id, content, sortIndex, state.id, newRev, createdAt, updatedAt, folder, id),
+                )
+            } else {
+                db.exec(
+                    "INSERT INTO documents(id, title, format, content, sort_index, state," +
+                        " revision, created_at, updated_at, folder, recent_hidden, opened_at)" +
+                        " VALUES(?,?,?,?,?,?,?,?,?,?,0,0)",
+                    listOf(id, title, format.id, content, sortIndex, state.id, revision, createdAt, updatedAt, folder),
+                )
+            }
+            if (folder.isNotEmpty()) {
+                db.exec(
+                    "INSERT OR IGNORE INTO folders(name, created_at) VALUES(?,?)",
+                    listOf(folder, createdAt),
+                )
+            }
+        }
+    }
+
     fun updateTitle(id: String, title: String, updatedAt: Double) {
         db.exec("UPDATE documents SET title=?, updated_at=? WHERE id=?", listOf(title, updatedAt, id))
     }

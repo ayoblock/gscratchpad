@@ -1964,3 +1964,55 @@ v1.14.1（重做事件链路）、v1.14.2（补右键菜单）两次尝试后，
   焦点），属现状行为，未改动。
 - 若用户实测仍出现「编辑模式但不可编辑」，下一层排查方向为真机 WM
   焦点时序与 WebView 加载竞态（探针环境无法复现）。
+
+## 修订三十八（v1.17.0 / Android 0.9.0）：WebDAV 备份 + 多端同步 v1
+
+**日期**：2026-11-25　**范围**：桌面 + Android（本次为双端同规约合体发版）
+
+### 一、功能内容
+
+- **桌面 WebDAV 自动备份（方案 B）**：`webdav.py` 传输层（stdlib urllib，PUT/GET/HEAD/
+  PROPFIND/MKCOL，Basic 认证，内嵌 `user@host` URL 解析，12s/30s 超时 + 1 次重试）；
+  `backupzip.py` schema 3 打包/解包（与 Android `BackupExporter` 字节兼容）；
+  `cloud.py` CloudManager（指纹短路、wal_checkpoint 快照、30 分钟备份周期、libsecret
+  密钥存储 + meta 明文兜底）；远端文件名 `gscratchpad-desktop.zip`（与 Android
+  `gscratchpad-cloud.zip` 区分，互不覆盖）。
+- **多端同步 v1（`docs/SYNC_PROTOCOL.md`）**：每设备目录 `sync/<device-id>/` 下
+  manifest.json + docs.zip + assets 内容寻址文件；时间戳墓碑（updated_at 新者胜）；
+  三态合并规划器（仅远端变→应用；双变冲突→updated_at 新者胜、败者保全、平局本地胜；
+  仅本地变→推送）；隐式墓碑发现防陈旧 manifest 复活；meta 永不同步；assets 差量上传。
+  桌面 `syncengine.py` + Android `SyncEngine.kt` 逐语义对应，共用 SM-01…SM-11 夹具。
+- **Android 接入**：`SyncDav.kt`（HttpURLConnection）+ `SyncEngine.kt` +
+  `DocumentDao.applyRemote`（revision=max(local,incoming)+1）+ 删除/清空记录墓碑 +
+  云对话框「自动同步（打开应用时）」开关、「立即同步」按钮、最近同步结果显示；
+  onResume 触发（无后台调度，用户拍板）。
+
+### 二、测试证据
+
+- 桌面全量 **239 例 OK**（`/usr/bin/python3 -m unittest discover -s tests`），含新增
+  `test_sync_merge.py`（SM-01…SM-11 纯规划器夹具）、`test_cloud_local.py`（stub
+  WebDAV 双设备 E2E：拉推/冲突保全/删除传播/对端重建恢复/资产同步/状态往返）、
+  `test_cloud_gui.py`（对话框构建、删除→墓碑落盘）。
+- Android JVM 全量 **223 例 OK**（`gradlew :app:testDebugUnitTest`），含新增
+  `SyncEngineTest`（18 例：SM 夹具复刻 + MemoryDav 双设备 E2E + 认证/URL 解析）。
+- **真实服务器 E2E 全过**（AList `http://10.42.239.55:5244/dav/hdd/test`，用户开通
+  WebDAV 写权限后）：双设备 推→拉→互改→冲突 updated_at 新者胜+败者保全→删除传播
+  →删除正文保全，七项断言全部 PASS（e2e 临时目录用后即删，远端已清理）。
+
+### 三、过程中修复的真实缺陷
+
+1. **Android assets 永不同步**：`fetchPeerManifests` 把 manifest 的 `assets` 数组原样
+   存 `JSONArray`，`fetchPeerAssets` 的 `as? List<String>` 必失败——manifest 解析时
+   转为 `List<String>`。
+2. **冲突计数漏计**：双端引擎都只在「本地胜→保全」分支累加 conflicts，「对端胜→应用」
+   分支不计数——改为直接取 planner 统计（桌面 `result.conflicts = plan.stats`）。
+3. **JVM 测试传输抽象**：桌面 JDK 的 HttpURLConnection 拒绝 MKCOL/PROPFIND 自定义
+   方法（Android 运行时无此限制），引擎改依赖 `DavOps` 接口，测试注入 MemoryDav。
+
+### 四、版本与产物
+
+- 桌面 1.16.5 → **1.17.0**；`dist/gscratchpad_1.17.0-1_all.deb`。
+- Android 0.8.3/versionCode 46 → **0.9.0/versionCode 47**；双 ABI 正式签名
+  release APK（upload key，SHA-256 指纹与登记一致）：
+  `scratchpad-arm64-v8a-release-0.9.0.apk`、`scratchpad-x86_64-release-0.9.0.apk`。
+- 真机安装回归未执行（无连接设备）；UI 观感（云对话框新开关/按钮）待真机目视。

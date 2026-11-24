@@ -235,6 +235,7 @@ class Store:
         self._pending_lock = threading.Lock()
         self._callbacks: list[Callable[[SaveState], None]] = []
         self._callback_lock = threading.Lock()
+        self._deleted_callbacks: list[Callable[[list[str]], None]] = []
         self._last_error: str = ""
         self._closing = False
 
@@ -556,6 +557,16 @@ class Store:
             except Exception:  # UI 回调异常不得影响持久化
                 pass
 
+    def _emit_deleted(self, ids: list[str]) -> None:
+        """文档删除事件（工作线程内）。syncstate 用它维护墓碑集合。"""
+        with self._callback_lock:
+            callbacks = list(self._deleted_callbacks)
+        for callback in callbacks:
+            try:
+                callback(ids)
+            except Exception:  # 回调异常不得影响写线程
+                pass
+
     def _enqueue(self, job: tuple) -> None:
         self._queue.put(job)
 
@@ -766,6 +777,78 @@ class Store:
         self._enqueue(("flush", (done,)))
         return done.wait(timeout=timeout)
 
+    # ---------------------------------------------------------------- 云同步支撑
+
+    def on_deleted(self, callback: Callable[[list[str]], None]) -> None:
+        """订阅文档删除事件（delete / purge_closed，工作线程内触发）。"""
+        with self._callback_lock:
+            self._deleted_callbacks.append(callback)
+
+    def fingerprint(self) -> str:
+        """库内容指纹：文档数 + 最大 revision + 内容字节总量。
+
+        用于自动备份/同步的「有无变化」短路，避免无谓上传。
+        """
+        row = self._query_one(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(revision),0) AS r,"
+            " COALESCE(SUM(LENGTH(CAST(content AS BLOB))),0) AS s FROM documents"
+        )
+        if row is None:
+            return "0"
+        folders = self._query_one("SELECT COUNT(*) AS n FROM folders")
+        return f"{row['n']}:{row['r']}:{row['s']}:{folders['n'] if folders else 0}"
+
+    def local_revisions(self) -> dict[str, int]:
+        return {
+            row["id"]: row["revision"]
+            for row in self._query("SELECT id, revision FROM documents")
+        }
+
+    def snapshot_db_to(self, target: Path, *, wait: bool = True) -> bool:
+        """工作线程内 checkpoint(TRUNCATE) 后把库文件复制到 target。"""
+        target = Path(target)
+        done = threading.Event()
+        error: list[str] = []
+        self._enqueue(("snapshot", (target, done, error)))
+        if wait:
+            done.wait(timeout=30.0)
+        return not error
+
+    def apply_remote(self, doc: dict, *, wait: bool = True) -> None:
+        """应用远端文档（同步/备份导入落库的唯一入口）。
+
+        dict 字段：id/title/format/content/sort_index/state/revision/
+        created_at/updated_at/folder。本地已存在时 revision 取
+        max(local, incoming)+1，其余字段以 incoming 为准（含 updated_at，
+        保持对端时序用于后续冲突判定）；写镜像与 folders 登记。
+        """
+        doc = dict(doc)
+        done = threading.Event()
+        error: list[str] = []
+        self._enqueue(("apply_sync", (doc, done, error)))
+        if wait:
+            done.wait(timeout=15.0)
+        if error:
+            raise RuntimeError(error[0])
+
+    def delete_remote(self, doc_id: str, preserve: Path | None = None, *, wait: bool = True) -> None:
+        """同步级删除：可选先把正文保全到 preserve，再删除行/镜像/资源。"""
+        done = threading.Event()
+        error: list[str] = []
+        self._enqueue(("delete_sync", (doc_id, preserve, done, error)))
+        if wait:
+            done.wait(timeout=15.0)
+        if error:
+            raise RuntimeError(error[0])
+
+    def merge_folders(self, folders: list[tuple[str, float]], *, wait: bool = True) -> None:
+        if not folders:
+            return
+        done = threading.Event()
+        self._enqueue(("folder-merge", (folders, done)))
+        if wait:
+            done.wait(timeout=10.0)
+
     # ------------------------------------------------------------------ 工作线程
 
     def _worker(self) -> None:
@@ -901,6 +984,7 @@ class Store:
                     import shutil
 
                     shutil.rmtree(self._assets / doc_id, ignore_errors=True)
+                    self._emit_deleted([doc_id])
                     if done is not None:
                         done.set()
                 elif kind == "purge_closed":
@@ -959,6 +1043,7 @@ class Store:
                                     shutil.rmtree(target)
                             except OSError as exc:
                                 report.errors.append(f"{doc_id}: {exc}")
+                        self._emit_deleted(ids)
                     if done is not None:
                         done.set()
                 elif kind == "maintain":
@@ -1007,6 +1092,100 @@ class Store:
                     done = payload[0]
                     self._drain_pending(conn)
                     done.set()
+                elif kind == "snapshot":
+                    target, done, error = payload
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        import shutil
+
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(self._db_path, target)
+                    except (OSError, sqlite3.Error) as exc:
+                        error.append(str(exc))
+                    finally:
+                        done.set()
+                elif kind == "apply_sync":
+                    doc, done, error = payload
+                    try:
+                        existing = conn.execute(
+                            "SELECT revision FROM documents WHERE id=?", (doc["id"],)
+                        ).fetchone()
+                        if existing is not None:
+                            new_rev = max(existing["revision"], int(doc["revision"])) + 1
+                            conn.execute(
+                                "UPDATE documents SET title=?, format=?, content=?,"
+                                " sort_index=?, state=?, revision=?, created_at=?,"
+                                " updated_at=?, folder=? WHERE id=?",
+                                (
+                                    doc["title"], doc["format"], doc["content"],
+                                    doc["sort_index"], doc["state"], new_rev,
+                                    doc["created_at"], doc["updated_at"], doc["folder"],
+                                    doc["id"],
+                                ),
+                            )
+                        else:
+                            conn.execute(
+                                "INSERT INTO documents(id, title, format, content,"
+                                " sort_index, state, revision, created_at, updated_at, folder)"
+                                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                (
+                                    doc["id"], doc["title"], doc["format"], doc["content"],
+                                    doc["sort_index"], doc["state"], int(doc["revision"]),
+                                    doc["created_at"], doc["updated_at"], doc["folder"],
+                                ),
+                            )
+                            new_rev = int(doc["revision"])
+                        if doc.get("folder"):
+                            conn.execute(
+                                "INSERT OR IGNORE INTO folders(name, created_at) VALUES(?,?)",
+                                (doc["folder"], doc["created_at"] or 0),
+                            )
+                        conn.commit()
+                        self._mirror(doc["id"], doc["content"], doc["format"])
+                        doc["_applied_revision"] = new_rev
+                    except sqlite3.Error as exc:
+                        error.append(str(exc))
+                    finally:
+                        done.set()
+                elif kind == "delete_sync":
+                    doc_id, preserve, done, error = payload
+                    try:
+                        row = conn.execute(
+                            "SELECT content, format FROM documents WHERE id=?", (doc_id,)
+                        ).fetchone()
+                        if row is not None and preserve is not None:
+                            preserve.parent.mkdir(parents=True, exist_ok=True)
+                            _atomic_write(
+                                preserve,
+                                row["content"].encode("utf-8"),
+                            )
+                        conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+                        conn.commit()
+                        if row is not None:
+                            fmt = row["format"]
+                            (self._notes / f"{doc_id}.{fmt}").unlink(missing_ok=True)
+                            (
+                                self._notes / f"{doc_id}.{'md' if fmt == 'txt' else 'txt'}"
+                            ).unlink(missing_ok=True)
+                            import shutil
+
+                            shutil.rmtree(self._assets / doc_id, ignore_errors=True)
+                    except (OSError, sqlite3.Error) as exc:
+                        error.append(str(exc))
+                    finally:
+                        done.set()
+                elif kind == "folder-merge":
+                    folders, done = payload
+                    try:
+                        conn.executemany(
+                            "INSERT OR IGNORE INTO folders(name, created_at) VALUES(?,?)",
+                            [(name, created_at or 0) for name, created_at in folders],
+                        )
+                        conn.commit()
+                    except sqlite3.Error as exc:
+                        self._last_error = str(exc)
+                    finally:
+                        done.set()
             except sqlite3.Error as exc:
                 self._last_error = str(exc)
                 if kind == "save":

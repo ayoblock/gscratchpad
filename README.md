@@ -43,6 +43,7 @@
 - 文本片段与触发词展开（`{{cursor}}`、`{{date}}` 等变量，可录制快捷键）
 - 命令菜单（Ctrl+K）：全命令搜索执行，显示真实生效的快捷键
 - capture v1 接口：D-Bus / CLI 供其它程序把笔记写入本应用（见[手册](docs/DESKTOP_GUIDE.md#供其它程序调用capture-v1)）
+- WebDAV 云备份与多端同步 v1：自动备份到 `gscratchpad-desktop.zip`，与 Android 等设备按 `docs/SYNC_PROTOCOL.md` 互相同步，冲突败者保全
 
 **Android 版特性**
 
@@ -53,6 +54,7 @@
 - 维护功能与桌面对齐：清除已关闭笔记、清理孤儿文件，提示如实标注「只删应用内记录」
 - 存储权限按系统版本分流：Android 11+ 用 MANAGE_EXTERNAL_STORAGE，低版本动态申请 + Android 10 兼容标志；返回键一次退出，不被常驻 WebView 面板拦截
 - WebDAV 云备份与恢复、PDF 打印导出、物理键盘快捷键、夜间模式
+- **多端同步（v1）**：与桌面版共用同一同步协议（`docs/SYNC_PROTOCOL.md`），同一 WebDAV 目录下多台设备文档互相同步——updated_at 新者胜、删除墓碑传播、冲突败者正文保全到 recovery/；打开应用时自动同步（无后台调度），也可手动「立即同步」
 
 ## 安装
 
