@@ -1,6 +1,12 @@
 # GScratchpad 云同步协议（sync v1）
 
-状态：active（2026-11-25） · 适用：桌面 ≥1.17.0 / Android ≥0.9.0 · 传输：WebDAV
+状态：active（2026-11-25） · 适用：桌面 ≥1.17.0 / Android ≥0.9.1 · 传输：WebDAV
+
+> **Android 0.9.1 相对 v1 基线语义的三处调整（用户拍板）**：① 冲突败者由 `recovery/`
+> 纯文本改为**可编辑冲突文档**（§7）；② 冲突裁决由纯 `updated_at` 改为
+> **`(updated_at, device_id)` 字典序元组**（§7，仅平局生效，桌面夹具保持默认本地胜）；
+> ③ 本地墓碑加 **90 天过期清理**（§4）。三处均为 Android 侧增量，桌面 1.17.0 仍按原
+> v1 语义；跨版本互操作时平局裁决可能不一致，但不影响多数场景。
 
 本规约是桌面端（`src/scratchpad/syncengine.py`）与 Android 端
 （`android/.../platform/SyncEngine.kt`）两个实现的唯一事实来源。合并语义的任何
@@ -78,7 +84,13 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
 
 不修改两端 db schema（无 deleted_at 列）：删除即真实删除 + 带时间戳墓碑
 传播，避免 v4/v6 迁移与 CHECK 约束变更。已知边界：从备份恢复的旧文档
-（updated_at 早于墓碑）会被较新的删除收敛，内容保全在 recovery/ 可找回。
+（updated_at 早于墓碑）会被较新的删除收敛，删除正文保全在 recovery/ 可找回。
+
+**墓碑 90 天过期清理（Android 0.9.1 增量）**：本地 `sync-state.json` 的墓碑超过
+90 天即从 `deleted` 与 `own_pushed_deleted` 移除，并同步清 `own_pushed[docId]`
+（否则收敛阶段会立即重建墓碑，TTL 失效）。**一致性代价**：若对端仍持有该墓碑，
+下一轮 `planSync` 会重新学习并恢复删除语义——这是最终一致的固有代价，不保证单轮
+收敛；对端墓碑同样过期后才会彻底消失。TTL 常量 `SyncState.TOMBSTONE_TTL_SECONDS`。
 
 ## 5. 同步算法
 
@@ -123,11 +135,19 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
 ## 7. 冲突
 
 - 判定：双变且 `local_hash != peer_hash`。
-- 胜者：`updated_at` 较新者；相等（同一编辑回传等场景）时以本地为胜者。
-- 败者保全：败者正文写入 `recovery/sync-<时间戳>/<doc_id>-<local|peer>.<ext>`，
-  文件头两行注释标注 `<!-- sync-conflict: doc=<id> winner=<src> at=<ts> -->`
-  （txt/html 无 HTML 注释语法时仅文件名承担溯源）。
-- 胜者按 §6 应用或留在本地等待 push。
+- 胜者：`(updated_at, device_id)` 字典序元组较大者（Android 0.9.1 起）。
+  - 桌面夹具默认 `localDeviceId = "\uFFFF"`（大于任何 hex device id），故**平局本地胜**
+    语义保持不变；生产调用传真实 device id，平局时 device id 大者胜。
+  - 这是 Android 侧增量；桌面 1.17.0 仍为纯 `updated_at` 平局本地胜。
+- **败者改为可编辑冲突文档（Android 0.9.1 起，替代原 recovery 纯文本保全）**：
+  - 在库内新建独立文档（新 UUID），标题 `<原题> (冲突 yyyyMMdd-HHmmss)`，与胜者并存
+    于文档列表，可被编辑/另存/删除；下一轮 push 进入本设备目录，其它设备可见。
+  - 正文首行溯源头：md/html 为 `<!-- gs-sync-conflict: doc=<原id> loser=<local|peer>
+    peer=<peerId> at=<ts> -->`，txt 为 `# gs-sync-conflict: ...`。
+  - `folder` 清空、`state=open`、`revision=0`、时间戳取本轮同步时刻；notes 镜像同步写入。
+  - **删除传播的败者正文仍写 `recovery/sync-<时间戳>/`**（属删除安全网，不产文档），
+    与冲突败者处理区分。
+  - 结果行新增「冲突文档 N」计数，静默判定含该计数。
 
 ## 8. 传输要求
 
@@ -157,10 +177,12 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
 
 - 桌面：`src/scratchpad/syncengine.py` + `webdav.py`（v1.17.0 落地）。
 - Android：`platform/SyncDav.kt` + `platform/SyncEngine.kt`（0.9.0 落地，
-  引擎经 `DavOps` 接口解耦以便 JVM 测试注入内存传输）。
+  引擎经 `DavOps` 接口解耦以便 JVM 测试注入内存传输）；0.9.1 增量落地冲突文档 /
+  deviceId 元组裁决 / 墓碑 90 天清理（见文首三处调整说明）。
 - 夹具：桌面 `tests/test_sync_merge.py`（SM-01…SM-11）= Android
   `SyncEngineTest` 同名场景，逐字段对应。
-- 已验证：桌面 239 例、Android 223 例全绿；真实 AList 服务器
+- 已验证：桌面 239 例、Android 225 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
+  tombstone TTL；改 1 例：冲突败者改为可编辑文档）；真实 AList 服务器
   （`http://10.42.239.55:5244/dav/hdd/test`）双设备 E2E 全过：
   推→拉→互改→冲突 updated_at 新者胜+败者保全→删除传播→删除正文保全。
   已知实现细节：败者保全发生在「持有败者内容的一侧」（若败者此前已推送，

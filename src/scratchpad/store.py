@@ -191,7 +191,12 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path), timeout=10.0, isolation_level=None)
+    # check_same_thread=False：reader 连接在主线程创建，但云同步/备份在
+    # 守护线程里经 _query 读它（修订四十）。WAL 下并发读安全，读侧有
+    # _read_lock 串行化；writer 连接仍只在 worker 线程内使用。
+    conn = sqlite3.connect(
+        str(path), timeout=10.0, isolation_level=None, check_same_thread=False
+    )
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA foreign_keys=ON")

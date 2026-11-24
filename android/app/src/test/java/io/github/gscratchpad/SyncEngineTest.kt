@@ -158,6 +158,37 @@ class SyncEngineTest {
         assertEquals(listOf("p" to "d1"), plan.preservePeer)
     }
 
+    // SM-06b（P2）：同一 updated_at 下按 deviceId 字典序裁决，deviceId 大者胜
+    @Test
+    fun sm06b_conflict_tie_break_by_device_id() {
+        val peerId = "zzzz-peer" // > "local-device"
+        val base = SyncPlanner.planSync(
+            local = mapOf("d1" to LocalDocInfo("Hlocal", 2, 200.0)),
+            ownPushed = mapOf("d1" to "H0"),
+            ownDeleted = emptyMap(),
+            peers = listOf(peer(peerId, mapOf("d1" to entry("d1", "Hpeer", 3, 200.0)))),
+            peerStates = mapOf(peerId to mapOf("d1" to "H0")),
+            now = 0.0,
+            localDeviceId = "local-device",
+        )
+        // 对端 deviceId 更大 → 对端胜
+        assertEquals(1, base.applies.size)
+        assertTrue(base.preserveLocalBeforeApply.contains("d1"))
+
+        // 反过来本地 deviceId 更大 → 本地胜
+        val localWins = SyncPlanner.planSync(
+            local = mapOf("d1" to LocalDocInfo("Hlocal", 2, 200.0)),
+            ownPushed = mapOf("d1" to "H0"),
+            ownDeleted = emptyMap(),
+            peers = listOf(peer("aaa-peer", mapOf("d1" to entry("d1", "Hpeer", 3, 200.0)))),
+            peerStates = mapOf("aaa-peer" to mapOf("d1" to "H0")),
+            now = 0.0,
+            localDeviceId = "zzzz-local",
+        )
+        assertTrue(localWins.applies.isEmpty())
+        assertEquals(listOf("aaa-peer" to "d1"), localWins.preservePeer)
+    }
+
     // SM-07 墓碑删除本地文档
     @Test
     fun sm07_tombstone_deletes_local() {
@@ -358,7 +389,7 @@ class SyncEngineTest {
     }
 
     @Test
-    fun `conflict_loser_preserved_in_recovery`() {
+    fun `conflict_loser_becomes_editable_document`() {
         val dav = MemoryDav()
         val a = newDevice("devA")
         val b = newDevice("devB")
@@ -375,19 +406,36 @@ class SyncEngineTest {
             d.putDoc("d1", own, if (d === a) 100.0 else 200.0)
         }
 
-        // B 先推（分叉编辑入云端），A 再拉：对端 B（200）比本地 A（100）新 → B 胜，A 侧应用 + 保全
+        // B 先推（分叉编辑入云端），A 再拉：对端 B（200）比本地 A（100）新 → B 胜，A 侧应用 + 生成冲突文档
         val rb = engine(b, dav).run()
         val r = engine(a, dav).run()
         assertTrue("msg=${r.message}", r.ok)
         assertEquals(1, r.conflicts)
+        assertEquals(1, r.conflictDocs)
         assertEquals("B-edit", a.dao.get("d1")?.content)
-        val kept = preservedFiles(a).firstOrNull { it.second == "A-edit" }
-        assertNotNull("败者本地正文应保全到 recovery/", kept)
 
-        // B 再跑：对端 A manifest 已是 B 的内容（基线刷新），无冲突
+        // 败者 A-edit 不再是 recovery 纯文本，而是库内可编辑文档（新 id + 冲突标题 + 溯源头）
+        val conflictDocs = a.dao.allDocuments(includeClosed = true).filter { it.id != "d1" }
+        assertEquals(1, conflictDocs.size)
+        val cd = conflictDocs.first()
+        assertTrue("标题应带冲突标记: ${cd.title}", cd.title.startsWith("d1 (冲突 "))
+        assertTrue("正文应保留败者原文", cd.content.contains("A-edit"))
+        assertTrue("正文应有溯源头", cd.content.contains("gs-sync-conflict: doc=d1 loser=local peer=devB"))
+        assertEquals(Format.MD, cd.format)
+        assertTrue("冲突文档应落 notes 镜像", File(a.paths.notes, "${cd.id}.md").isFile)
+        assertTrue("不应再向 recovery 写冲突纯文本", preservedFiles(a).isEmpty())
+
+        // 冲突文档随下一轮 push 进入 A 自己的云端目录，其它设备可见
+        val ap = engine(a, dav).run()
+        assertTrue("msg=${ap.message}", ap.ok)
+        val aManifest = String(dav.get("sync/devA/manifest.json")!!, Charsets.UTF_8)
+        assertTrue("冲突文档应被推送到远端", aManifest.contains(cd.id))
+
+        // B 再跑：对端 A manifest 已含冲突文档，B 应用；d1 本身基线已刷新无冲突
         val r2 = engine(b, dav).run()
         assertTrue("msg=${r2.message}", r2.ok)
         assertEquals("B-edit", b.dao.get("d1")?.content)
+        assertNotNull("冲突文档应同步到对端", b.dao.get(cd.id))
     }
 
     @Test
@@ -406,8 +454,9 @@ class SyncEngineTest {
         assertEquals("v1", b.dao.get("d1")?.content)
 
         // B 删除（repo 路径同款：墓碑 + 删行）
+        // 墓碑时间戳必须用真实 epoch：P2 的 90 天 TTL 会清理 1970 年代的旧时间戳夹具。
         val st = SyncState.load(b.stateFile)
-        st.addDeleted("d1", 200.0)
+        st.addDeleted("d1", System.currentTimeMillis() / 1000.0 - 5.0)
         SyncState.save(b.stateFile, st)
         b.dao.delete("d1")
         val r2 = eb.run()
@@ -472,6 +521,28 @@ class SyncEngineTest {
         assertEquals(200.0, loaded.ownPushedDeleted["d1"]!!, 1e-9)
         assertEquals(setOf("d1/img.png"), loaded.ownAssetsPushed)
         assertEquals("H1", loaded.peers["devY"]!!["d1"])
+    }
+
+    @Test
+    fun `tombstone_expires_after_90_days`() {
+        val now = 1_800_000_000.0
+        val st = SyncState().apply {
+            deviceId = "devX"
+            addDeleted("old", now - 91 * 86400.0)   // 91 天前 → 过期
+            addDeleted("fresh", now - 3 * 86400.0)  // 3 天前 → 保留
+            ownPushed["old"] = "H"
+            ownPushed["fresh"] = "H2"
+        }
+        val n = st.expireTombstones(now)
+        assertEquals(1, n)
+        assertNull(st.deleted["old"])
+        // 注意 JUnit4 同时有 assertNull(Object,String) 与 assertNull(String,Object) 两个重载，
+        // Kotlin 会把 String 实参绑到前者；用「消息在前」消除歧义。
+        assertNull("过期墓碑须同步清 ownPushed，否则收敛阶段会立即重建", st.ownPushed["old"])
+        assertEquals(now - 3 * 86400.0, st.deleted["fresh"])
+
+        // 过期后再次收敛不会重建：ownPushed 已清，收敛循环跳过
+        assertTrue(st.ownPushed.containsKey("fresh"))
     }
 
     @Test

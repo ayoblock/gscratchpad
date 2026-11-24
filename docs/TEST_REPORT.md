@@ -2041,3 +2041,40 @@ v1.14.1（重做事件链路）、v1.14.2（补右键菜单）两次尝试后，
 
 - 桌面 1.17.0 → **1.17.1**；`dist/gscratchpad_1.17.1-1_all.deb`。
 - Android 本轮无代码改动，维持 0.9.0/versionCode 47，不出包。
+
+## 修订四十（v1.17.2）：修复新设备首次同步跨线程 SQLite 崩溃
+
+**日期**：2026-11-25　**范围**：桌面
+
+### 一、故障现象
+
+设备 A（Android）备份到 WebDAV 后，新设备（桌面）配同目录同步时报错 toast：
+「同步失敗：SQLite objects created in a thread can only be used in that same
+thread. …」，同步整体失败。
+
+### 二、根因
+
+`Store.open()` 在主线程创建 `_reader` 连接（sqlite3 默认
+`check_same_thread=True`）；云同步/备份在 `gsp-sync`/`gsp-backup` 守护线程里
+运行，引擎与备份的 `all_documents()` / `get()` / `folders()` /
+`local_revisions()` / `fingerprint()` 均经 `_query` 直接使用 `_reader` →
+跨线程 `ProgrammingError`。此前未暴露：E2E 均在主线程直跑 `engine.run()`，
+GUI 冒烟未走真实网络同步。
+
+### 三、修复
+
+`store.py _connect()` 加 `check_same_thread=False`：WAL 模式下 reader 并发读
+安全，读侧本就有 `_read_lock` 串行化；writer 连接仍只在 worker 线程内使用。
+Android 不受影响（Room 自身线程安全）。
+
+### 四、测试证据
+
+- 新增回归 `test_engine_runs_in_worker_thread`：真实 Store + 非主线程完整跑
+  一轮同步。还原修复时该测试精确复现生产错误（FAILED），恢复修复后通过——
+  证明覆盖有效。
+- 全量回归 **240 例 OK**。
+
+### 五、版本与产物
+
+- 桌面 1.17.1 → **1.17.2**；`dist/gscratchpad_1.17.2-1_all.deb`。
+- Android 无改动，维持 0.9.0/47。

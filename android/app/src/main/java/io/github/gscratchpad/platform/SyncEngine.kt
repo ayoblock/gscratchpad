@@ -3,6 +3,7 @@ package io.github.gscratchpad.platform
 import io.github.gscratchpad.data.AppPaths
 import io.github.gscratchpad.data.AtomicFiles
 import io.github.gscratchpad.data.DocumentDao
+import io.github.gscratchpad.data.MirrorStore
 import io.github.gscratchpad.domain.model.DocState
 import io.github.gscratchpad.domain.model.Format
 import org.json.JSONObject
@@ -53,6 +54,9 @@ data class SyncState(
     var lastResult: String = "",
 ) {
     companion object {
+        /** 墓碑保留期：90 天（用户拍板）。过期墓碑在收敛阶段清理，防止状态文件无限膨胀。 */
+        const val TOMBSTONE_TTL_SECONDS: Long = 90L * 24 * 60 * 60
+
         fun load(file: File): SyncState {
             val state = SyncState()
             runCatching {
@@ -122,6 +126,32 @@ data class SyncState(
         }
     }
 
+    /**
+     * 墓碑 90 天过期清理（P2）：只删本设备登记的过期墓碑，不触碰 learned-from-peer 之外的数据。
+     * 返回清理条数。清理后若对端仍持有该墓碑，下一轮 planSync 会重新学习——这是 tombstone
+     * 的最终一致性代价，规约 §4 已注明。
+     */
+    fun expireTombstones(now: Double, ttlSeconds: Long = TOMBSTONE_TTL_SECONDS): Int {
+        val cutoff = now - ttlSeconds
+        var n = 0
+        val it = deleted.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (entry.value < cutoff) {
+                // 同步移除 ownPushed：否则收敛阶段「ownPushed 有但本地无且无墓碑」会立即重建墓碑，
+                // 使 TTL 形同虚设（expired 日志由调用方上报）。
+                ownPushed.remove(entry.key)
+                it.remove()
+                n++
+            }
+        }
+        val itp = ownPushedDeleted.iterator()
+        while (itp.hasNext()) {
+            if (itp.next().value < cutoff) { itp.remove() }
+        }
+        return n
+    }
+
     fun addDeleted(docId: String, ts: Double? = null) {
         val stamp = ts ?: (System.currentTimeMillis() / 1000.0)
         val current = deleted[docId]
@@ -155,6 +185,11 @@ data class LocalDocInfo(val hash: String, val revision: Long, val updatedAt: Dou
  * 纯函数合并规划器（与桌面 plan_sync 逐语义对应；夹具 SM-01…SM-11 双端共用）。
  */
 object SyncPlanner {
+    /**
+     * 平局哨兵：JVM 夹具 SM-01…SM-11 与桌面端共用（桌面端平局本地胜），默认传此值保持
+     * 既有夹具断言不变；生产调用必须传入真实 [SyncState.deviceId] 才启用 P2 元组裁决。
+     */
+    const val TIE_LOCAL_WINS = "\uFFFF"
 
     data class Plan(
         val applies: List<Pair<String, PeerEntry>> = emptyList(),
@@ -176,6 +211,7 @@ object SyncPlanner {
         peers: List<PeerManifest>,
         peerStates: Map<String, Map<String, String>>,
         now: Double,
+        localDeviceId: String = TIE_LOCAL_WINS,
     ): Plan {
         val applies = mutableListOf<Pair<String, PeerEntry>>()
         val preserveLocal = mutableListOf<String>()
@@ -256,9 +292,12 @@ object SyncPlanner {
                 val peerChanged = peerHash != baseline[docId]
                 val localChanged = localHash != ownPushed[docId]
                 if (peerChanged && localChanged) {
-                    // 冲突：updated_at 新者胜，平局本地胜
+                    // 冲突（P2）：(updated_at, device_id) 字典序元组裁决，消灭平局歧义。
+                    // 桌面夹具默认 localDeviceId=TIE_LOCAL_WINS（"\uFFFF" > 任何 hex deviceId），
+                    // 平局仍本地胜；生产传真实 deviceId，平局由 deviceId 大者胜。
                     val peerUpdatedAt = (entry["updated_at"] as? Number)?.toDouble() ?: 0.0
-                    val peerWins = peerUpdatedAt > localInfo.updatedAt
+                    val peerWins = peerUpdatedAt > localInfo.updatedAt ||
+                        (peerUpdatedAt == localInfo.updatedAt && peer.deviceId > localDeviceId)
                     if (peerWins) {
                         preserveLocal.add(docId)
                         applies.add(peer.deviceId to entry)
@@ -336,6 +375,8 @@ class SyncEngine(
         var applied: Int = 0,
         var deleted: Int = 0,
         var conflicts: Int = 0,
+        /** 本轮生成的冲突文档篇数（P1：冲突败者从 recovery 文本改为可编辑文档）。 */
+        var conflictDocs: Int = 0,
         var pushedDocs: Int = 0,
     )
 
@@ -381,10 +422,15 @@ class SyncEngine(
             }
         }
 
+        // ---- 墓碑 90 天过期清理（P2）：清理后对端仍持有则下轮重新学习，最终一致。
+        state.expireTombstones(nowTs)
+
         // ---- Pull
         dav.mkcolDeep("sync/${state.deviceId}")
         val peers = fetchPeerManifests(state)
-        val plan = SyncPlanner.planSync(local, state.ownPushed, state.deleted, peers, state.peers, nowTs)
+        val plan = SyncPlanner.planSync(
+            local, state.ownPushed, state.deleted, peers, state.peers, nowTs, state.deviceId,
+        )
 
         val preserveDir = preserveDir()
         result.conflicts = plan.conflicts
@@ -402,7 +448,7 @@ class SyncEngine(
             val docId = entry["id"] as String
             if (docId in plan.preserveLocalBeforeApply) {
                 dao.get(docId)?.let { existing ->
-                    preserve(preserveDir, "${docId}-local.${existing.format.ext}", existing.content)
+                    createConflictDoc(existing, "local", peerId, nowTs, result)
                 }
             }
             dao.applyRemote(
@@ -423,11 +469,16 @@ class SyncEngine(
         }
 
         for ((peerId, docId) in plan.preservePeer) {
-            val entry = peers.firstOrNull { it.deviceId == peerId }?.docs?.get(docId)
-            val content = entry?.let { peerDocContent(peerId, it, docsCache) }
-            if (content != null) {
-                preserve(preserveDir, "$docId-peer.${entry?.get("format") ?: "txt"}", content)
-            }
+            val entry = peers.firstOrNull { it.deviceId == peerId }?.docs?.get(docId) ?: continue
+            val content = peerDocContent(peerId, entry, docsCache) ?: continue
+            val loser = io.github.gscratchpad.domain.model.Document(
+                id = docId,
+                title = entry["title"] as? String ?: docId,
+                format = Format.fromId(entry["format"] as? String),
+                content = content,
+                updatedAt = (entry["updated_at"] as? Number)?.toDouble() ?: nowTs,
+            )
+            createConflictDoc(loser, "peer", peerId, nowTs, result)
         }
 
         for ((name, createdAt) in plan.folderMerge) {
@@ -444,7 +495,8 @@ class SyncEngine(
         result.pushedDocs = push(state, folders, result)
 
         result.ok = true
-        result.message = "同步完成：应用 ${result.applied}，删除 ${result.deleted}，冲突 ${result.conflicts}，推送 ${result.pushedDocs} 篇"
+        val conflictNote = if (result.conflictDocs > 0) "，冲突文档 ${result.conflictDocs}" else ""
+        result.message = "同步完成：应用 ${result.applied}，删除 ${result.deleted}，冲突 ${result.conflicts}$conflictNote，推送 ${result.pushedDocs} 篇"
         state.lastResult = result.message
         SyncState.save(stateFile, state)
     }
@@ -456,6 +508,46 @@ class SyncEngine(
         runCatching {
             dir.mkdirs()
             AtomicFiles.write(File(dir, filename), content.toByteArray(Charsets.UTF_8))
+        }
+    }
+
+    /**
+     * 冲突败者落地为可编辑冲突文档（P1，替代旧的 recovery 纯文本保全）。
+     *
+     * - 新文档用独立 UUID，标题带「(冲突 yyyyMMdd-HHmmss)」后缀，与胜者并存于文档列表，可被编辑/另存/删除。
+     * - 正文首行加溯源注释（md/html 用 HTML 注释，txt 用 `#` 行），标明来源设备与原始文档 id。
+     * - 同步属性按新文档参与下轮 push（自己的目录），因此其它设备也能看到该冲突副本。
+     * - `format` 沿用败者；`folder` 清空（避免误归入胜者文件夹）；revision 从 0 起。
+     */
+    private fun createConflictDoc(
+        loser: io.github.gscratchpad.domain.model.Document,
+        side: String,
+        peerId: String,
+        nowTs: Double,
+        result: Result,
+    ) {
+        runCatching {
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(java.util.Date())
+            val newId = java.util.UUID.randomUUID().toString().replace("-", "")
+            val header = when (loser.format) {
+                Format.TXT -> "# gs-sync-conflict: doc=${loser.id} loser=$side peer=$peerId at=$stamp\n\n"
+                else -> "<!-- gs-sync-conflict: doc=${loser.id} loser=$side peer=$peerId at=$stamp -->\n\n"
+            }
+            val conflictDoc = io.github.gscratchpad.domain.model.Document(
+                id = newId,
+                title = "${loser.title} (冲突 $stamp)",
+                format = loser.format,
+                content = header + loser.content,
+                sortIndex = 0,
+                state = DocState.OPEN,
+                revision = 0L,
+                createdAt = nowTs,
+                updatedAt = nowTs,
+                folder = "",
+            )
+            dao.insert(conflictDoc)
+            MirrorStore(paths).write(newId, conflictDoc.content, conflictDoc.format)
+            result.conflictDocs++
         }
     }
 

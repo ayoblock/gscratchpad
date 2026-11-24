@@ -227,6 +227,32 @@ class CloudLocalTestCase(unittest.TestCase):
 
     # ---------------------------------------------------------- 同步引擎
 
+    def test_engine_runs_in_worker_thread(self):
+        """修订四十回归：reader 连接主线程创建，同步在守护线程跑。
+
+        生产故障：新设备首次同步 toast「SQLite objects created in a thread
+        can only be used in that same thread」——引擎从同步线程经 _query 读
+        _reader。修复 = check_same_thread=False；本测试在非主线程完整跑一轮
+        同步（建文档→推送），跨线程读若仍被拒则 fail。
+        """
+        store_a = self._store("devA")
+        doc = store_a.create_document("md", title="跨线程同步")
+        store_a.submit_save(_replace(doc, content="线程外正文"), wait=True)
+
+        result: dict[str, object] = {}
+
+        def worker():
+            try:
+                result["msg"] = self._engine(store_a).run().message
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = repr(exc)
+
+        t = threading.Thread(target=worker, name="gsp-sync-test", daemon=True)
+        t.start()
+        t.join(timeout=30)
+        self.assertNotIn("error", result, f"同步线程异常：{result.get('error')}")
+        self.assertIn("同步完成", str(result.get("msg")))
+
     def test_two_device_sync_flow(self):
         store_a = self._store("devA")
         store_b = self._store("devB")
