@@ -82,7 +82,8 @@ class SidebarTest:
         sb = w.sidebar
         self.out["layout"] = type(w.overlay).__name__
         self.out["floating_frame"] = w.sidebar_frame.has_css_class("sidebar-float")
-        self.out["initial_visible"] = w.sidebar_visible()
+        # 启动默认收起侧边栏（不记忆上次展开状态）
+        self.out["initial_hidden"] = not w.sidebar_visible()
         self.out["initial_view"] = sb.shown_view()
 
         # 磁盘页必须是「切过去就有内容」，而不是等 reveal_local_path 才加载

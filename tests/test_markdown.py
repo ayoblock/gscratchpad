@@ -101,6 +101,59 @@ class MarkdownTestCase(unittest.TestCase):
         self.assertIn("page-break-inside: avoid", html)
 
 
+class FrontmatterTestCase(unittest.TestCase):
+    """预览 / PDF 导出隐藏 YAML frontmatter；正文中的 --- 不受影响。"""
+
+    def test_basic_frontmatter_hidden(self) -> None:
+        body = mr.render_body("---\ntitle: 郑居敬\nname: 测试\n---\n\n# 标题\n\n正文\n")
+        self.assertNotIn("title", body)
+        self.assertNotIn("郑居敬", body)
+        self.assertIn("<h1", body)
+        self.assertIn("正文", body)
+
+    def test_dots_close_hidden(self) -> None:
+        body = mr.render_body("---\ntitle: x\n...\n\n正文\n")
+        self.assertNotIn("title", body)
+        self.assertIn("正文", body)
+
+    def test_empty_frontmatter_hidden(self) -> None:
+        body = mr.render_body("---\n---\n正文\n")
+        self.assertEqual(body, mr.render_body("正文\n"))
+
+    def test_no_trailing_blank_line(self) -> None:
+        body = mr.render_body("---\na: 1\n---\n正文")
+        self.assertNotIn("a: 1", body)
+        self.assertIn("正文", body)
+
+    def test_unclosed_frontmatter_rendered_as_hr(self) -> None:
+        # 未闭合的 --- 不是 frontmatter，按普通分隔线 + 文本渲染
+        body = mr.render_body("---\ntitle: 没闭合\n\n正文\n")
+        self.assertIn("title: 没闭合", body)
+        self.assertIn("正文", body)
+
+    def test_hr_in_body_kept(self) -> None:
+        body = mr.render_body("# 直接标题\n\n---\n\n分隔回内容\n")
+        self.assertIn("直接标题", body)
+        self.assertIn("分隔回内容", body)
+        self.assertIn("<hr", body)
+
+    def test_setext_heading_not_stripped(self) -> None:
+        # 首行不是 --- 的 setext 标题（标题行 + --- 下划线）不受影响
+        body = mr.render_body("标题行\n---\n\n后续\n")
+        self.assertIn("标题行", body)
+        self.assertIn("后续", body)
+
+    def test_frontmatter_with_math_and_code_untouched_elsewhere(self) -> None:
+        body = mr.render_body("---\nlayout: post\n---\n\n```python\nx = 1\n```\n")
+        self.assertNotIn("layout", body)
+        self.assertIn("codehilite", body)
+
+    def test_pdf_export_inherits_strip(self) -> None:
+        html = mr.render_document("---\ntitle: 秘密\n---\n\n正文\n", print_mode=True)
+        self.assertNotIn("秘密", html)
+        self.assertIn("正文", html)
+
+
 class AssetsTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="sp-assets-"))

@@ -1729,3 +1729,238 @@ v1.14.1（重做事件链路）、v1.14.2（补右键菜单）两次尝试后，
   `_refresh_dim_colors()` 的两个透明度（0.32 / 0.05）。
 - 极长文档跨段移动会触发一次全文 `get_text`（重算段落边界），MB 级文档
   有可感知延迟；当前以段界签名短路，光标段内移动零开销。
+
+## 修订三十三（v1.16.1）：全应用复制统一为显式 UTF-8 文本
+
+### 一、需求与根因
+
+用户报告：在编辑区复制 Markdown 表格（源文档
+`~/obsidian/RebornMing/04-背景设定/郑居敬关系表.md`）后，GNOME Shell 剪贴板
+查看器把中文显示成 `\E4\BA\8C\E5\8D\81...` 形式的反斜杠转义。
+
+- `\XX` 是 GLib 把 UTF-8 字节按 Latin-1 呈现时的回退写法，对应 X11 传统
+  `STRING`/裸 `text/plain` 目标被按单字节解读的路径。
+- 探针实证：本机 GTK 4.22 的 `Gdk.Clipboard.set(str)` 与内置
+  `GtkTextBuffer.copy_clipboard()` 都只提供裸 `text/plain` +
+  `text/plain;charset=utf-8`，没有 `UTF8_STRING`。
+- 用户指令字面要求 `GdkClipboard.set_text()`；但本机 GIR 把该 API 标为
+  `introspectable="0"`，PyGObject 无法调用；且其 C 实现等价于
+  `set(clipboard, G_TYPE_STRING, text)`，产生的 targets 与现状相同，改用无效。
+  实际等价做法是 `set_content()` + `new_for_bytes("UTF8_STRING", ...)`。
+
+### 二、实现
+
+- 新增 `src/scratchpad/clipboard.py`：统一入口 `set_clipboard_utf8()`，显式
+  提供 `UTF8_STRING` 与 `text/plain;charset=utf-8` 目标。
+  **注：本版「刻意不提供裸 text/plain」的判断是错的，已在 v1.16.2 纠正，
+  详见修订三十四。**
+- `window.py`：`_on_window_key()` 在窗口 CAPTURE 阶段拦截 `Ctrl+C`，仅当焦点
+  在编辑区且有选区时改走 `copy_as_utf8_text()` 并返回 True（抢在 GtkTextView
+  内置 `text.copy-clipboard` 之前）；无选区或焦点在搜索框等控件时交还原生行为。
+- `editor.py`：新增 `copy_as_utf8_text()`（无选区则整篇），右键菜单新增
+  「复制为 UTF-8 文本」项，绑定 `win.copy-as-utf8-text` 动作。
+- `sidebar.py`（复制路径 / 复制文件名）与 `fssearch_ui.py`（复制文件路径）
+  两处 `.set()` 写入统一改用同一 helper——全应用所有复制入口归一。
+
+### 三、测试证据
+
+- 新增 `tests/test_copy_utf8_gui.py`：9 组断言全 true，覆盖右键菜单项、
+  GAction 选区/整篇复制、Ctrl+C 拦截（含焦点在编辑区/不在编辑区两种）、
+  helper 自身写入；中文表格（含 `<br>`、中文、Markdown 管道行）读回逐字节相等。
+  **注：当时的 formats 断言写成了「无裸 text/plain」，属错误判据，见修订三十四。**
+- 回归：现有非 GUI 测试 **209 例 OK**，无回归。
+- 构建：`dist/gscratchpad_1.16.1-1_all.deb`（旧版 1.16.0 按纪律自动清理），
+  包内确认含新增 `clipboard.py` 与四个改动模块。
+- 版本 1.16.0 → 1.16.1。
+
+### 四、残留风险
+
+- GtkTextView 内置右键菜单里的「复制」条目属于 GTK 内部实现，无法通过
+  `set_extra_menu()` 替换；该条目仍走原生 `text.copy-clipboard`（裸
+  `text/plain`）。已提供独立的「复制为 UTF-8 文本」菜单项与 Ctrl+C 路径
+  作为正确入口。
+- 剪切（Ctrl+X）沿用 GTK 内置行为，不在本次「复制行为」范围。
+
+## 修订三十四（v1.16.2）：修复 v1.16.1 复制完全失效的回归
+
+### 一、现象与根因
+
+用户实测：安装 v1.16.1 后，**Ctrl+C 与右键「复制为 UTF-8 文本」都无法复制**。
+
+- 根因：`set_clipboard_utf8()` 只提供 `UTF8_STRING` +
+  `text/plain;charset=utf-8`，**没有裸 `text/plain`**。X11 后端虽会在 TARGETS
+  里自动声明 `text/plain` / `STRING` / `TEXT` / `COMPOUND_TEXT`，但 provider
+  实际没有对应数据；消费者请求 `text/plain` 直接拿到
+  `g-io-error-quark: 沒有可傳輸剪貼簿內容的相容格式 (15)`，表现为复制失效。
+- 为何测试漏掉：测试用 `read_text_async()` 读回，它挑的是
+  `text/plain;charset=utf-8`，恰好绕开了失效的 `text/plain` 路径——**同进程
+  读回制造了假通过**。跨进程探针（独立 GTK 进程 / `wl-paste`）在沙箱中因
+  X11↔Wayland 桥接整体超时，未能第一时间暴露；最终用「按指定 target 逐项
+  `read_async`」才定位到错误 15。
+
+### 二、修正
+
+- `_TARGETS` 改为三项，且把 `UTF8_STRING` 放最前：
+  `("UTF8_STRING", "text/plain;charset=utf-8", "text/plain")`。
+  兼顾两点：支持 UTF-8 的消费者优先选 UTF8_STRING；只认 text/plain 的消费者
+  （GtkTextView、GNOME Shell 等）也能正常读到。X11 TARGETS 顺序随之变成
+  `UTF8_STRING` 在前，有利于纠正原先的 Latin-1 误读显示。
+- 明确原则：**不能靠「移除 text/plain」规避 Latin-1 误读**——那等于牺牲
+  复制可用性，是本末倒置。
+- `tests/test_copy_utf8_gui.py` 的错误判据 `no_bare_text_plain` 改为
+  `has_text_plain`，防止同类回归再次被测试掩盖。
+
+### 三、测试证据
+
+- 新增 GUI 断言全 true：`formats = ["UTF8_STRING", "text/plain",
+  "text/plain;charset=utf-8"]`，`has_text_plain = true`；选区/整篇/Ctrl+C/
+  helper 四条路径均逐字节相等，Ctrl+C 拦截与焦点外交还正常。
+- 按 target 逐项读取探针：`text/plain` 从错误 15 变为格式匹配可读。
+- 回归：现有非 GUI 测试 **209 例 OK**。
+- 构建：`dist/gscratchpad_1.16.2-1_all.deb`（旧版按纪律自动清理）。
+- 版本 1.16.1 → 1.16.2。
+
+### 四、残留风险
+
+- X11 传统 `STRING` target 仍由后端自动声明但无数据（请求报错误 15）；
+  只认 `STRING` 的极老旧消费者仍可能读不到。现代消费者均走
+  `UTF8_STRING` / `text/plain` / `text/plain;charset=utf-8`，不受影响。
+- GtkTextView 内置右键「复制」与剪切 Ctrl+X 仍未纳入改造（见修订三十三）。
+
+## 修订三十五（v1.16.3）：默认 UTF-8 归一 + 编码子菜单 + 启动收起侧边栏
+
+### 一、需求
+
+1. 所有复制动作默认都应是 UTF-8，右键不再放冗余的「复制为 UTF-8 文本」项；
+   用户拍板改为「复制为其它编码」**子菜单**（GBK / UTF-16）。
+2. 应用每次启动时默认收起侧边栏，不记忆上次的展开状态。
+
+### 二、实现
+
+- `clipboard.py`：拆出 `set_clipboard_encoded(text, encoding)`，
+  `set_clipboard_utf8()` 成为其 utf-8 分支的薄封装（仍走三目标，保持默认
+  复制行为不变）。非 UTF-8 编码提供 `text/plain;charset=<enc>` 与裸
+  `text/plain`，让认识 charset 的消费方能正确解码。
+- `editor.py`：新增模块级 `COPY_ENCODINGS = (("GBK","gbk"),("UTF-16","utf-16"))`
+  作为单一事实来源；`copy_as_encoded(encoding)` 复用选区/整篇取值逻辑；
+  右键由单条 UTF-8 项换成「复制为其它编码」子菜单。
+- `window.py`：`win.copy-as-utf8-text`（无参）换成
+  `win.copy-as-encoding`（`s` 参数）；侧边栏 ToggleButton 的初始 `active`
+  由读取 `sidebar_visible` 偏好改为固定 `False`，每次启动一律收起，
+  应用内仍可用 F9 / 头部按钮展开。
+
+### 三、测试证据
+
+- `tests/test_copy_utf8_gui.py` 全 true：无 UTF-8 冗余项、有编码子菜单、
+  GBK/UTF-16 动作存在且写入对应 MIME；默认 Ctrl+C / 整篇 / helper 的
+  formats 仍为 `["UTF8_STRING", "text/plain", "text/plain;charset=utf-8"]`；
+  启动侧边栏收起为 true。
+- 修正两处历史断言：`test_context_gui.py` 的 extra-menu 项数 5→6
+  （v1.16.1 加复制项时就该更新），`test_sidebar_gui.py` 的
+  `initial_visible` 改为 `initial_hidden`。
+- 非 GUI 全量 **209 例 OK**；maintenance / context GUI 全 true。
+- 构建 `dist/gscratchpad_1.16.3-1_all.deb`（旧版自动清理）。
+- 版本 1.16.2 → 1.16.3。
+
+### 四、残留风险
+
+- 「复制为 GBK / UTF-16」的内容是对应编码的原始字节；按 UTF-8 解读的
+  普通消费者会看到乱码，这是用户主动选非默认编码的预期结果。
+- X11 传统 `STRING` target 仍无数据（见修订三十四）。
+
+## 修订三十六（v1.16.4）：设置宽度覆盖预览区 + 预览隐藏 frontmatter
+
+### 一、需求（评估后用户拍板：方案 A）
+
+1. 写作模式宽度更名为「设置宽度」，源码与预览两区同时生效（内部
+   action `win.writing-mode`、meta key `writing_width` 保留，避免偏好迁移）。
+2. 预览不显示 md 文档的 YAML frontmatter。
+
+### 二、实现
+
+- **预览区宽度（方案 A，GTK 布局层）**：`editor.py` 将 `PreviewPane` 包进
+  与 `source_box` 同构的居中结构（`preview_box` + 两侧 hexpand pad），
+  `Paned` end_child 改为 `preview_box`；`_apply_writing_width` 拆出
+  `_apply_pane_width()` 分别按各自视口宽计算源码/预览目标宽。
+- **可见性切换根因（实测）**：`set_mode` 切换可见性后的首次宽度分配
+  **不触发 `notify::width`**，state 缓存停留旧值导致预览模式宽度不重算
+  （实测 412px ≠ 765px）。修复：`set_mode` / `map` 后经
+  `_kick_writing_apply()`（20ms timeout）补算；分配未完成（视口宽 0）时
+  有限重试（30 次 × 20ms）。另修 `set_mode` 切换对象：原只切
+  `self.preview`，顶层 `preview_box` 永远可见，SOURCE 模式下预览区空占
+  Paned 分割——现统一切 `preview_box`。
+- **UI 文案**：tooltip / 下拉菜单提示 / 命令面板四条 / 快捷键提示
+  （Ctrl+Shift+M）/ keymap 说明由「写作模式」改「设置宽度」，命令面板
+  keywords 增加「宽度 width」；菜单档位标签不变。
+- **frontmatter 隐藏**：`markdown_render._strip_frontmatter()` 在
+  `render_body` 入口剥离文档开头 `---` 包围块（或 `...` 收尾），仅当首行
+  是 `---` 且存在闭合行才剥离——正文中间 hr、setext 标题（`标题行\n---`）、
+  未闭合块均按普通 Markdown 渲染。编辑区原文不动；PDF 导出经
+  `render_document` 自动继承。
+
+### 三、测试证据
+
+- `tests/test_markdown.py` 新增 `FrontmatterTestCase` 9 例：标准块、
+  `...` 收尾、空块、无尾随空行、未闭合（保留为 hr+文本）、正文 hr、
+  setext 不误剥、代码块混排、PDF 导出继承剥离——全过。
+- `tests/test_writing_gui.py`：`_check_pct` 扩展预览区断言（可见时）；
+  新增预览模式场景——切 MODE_PREVIEW 后预览宽 = round(视口×85%) 且居中
+  （实测视口 900、宽 765、居中 true）；仅对可见区域断言，杜绝隐藏控件
+  残留分配造成的假失败。全量断言 FAILED KEYS: NONE。
+- 回归：非 GUI 全量 **218 例 OK**；`test_typewriter_gui.py` FAILED KEYS: NONE。
+- 构建 `dist/gscratchpad_1.16.4-1_all.deb`（旧版自动清理）。
+- 版本 1.16.3 → 1.16.4。
+
+### 四、残留风险
+
+- 预览 CSS 左右 padding（34px×2）使预览正文比同档位编辑区文本窄约 68px；
+  居中观感一致，未做补偿，实机目视后可再调。
+- WebView 未创建时（预览从未加载）`PreviewPane` 自然宽度为 placeholder
+  文本宽，设置宽度下 size_request 下限（≥360px）保证布局不塌缩。
+
+## 修订三十七（v1.16.5）：每文档模式持久化 + 启动恢复焦点补偿
+
+### 一、需求
+
+文档在预览/分屏模式关闭应用，重开应回到该模式；且重开后可直接编辑
+（用户实测：重开显示编辑模式但打字无效，需切一次模式才能编辑）。
+
+### 二、诊断（两阶段探针，独立进程复现真实「关闭→重启」）
+
+- 探针证实恢复链路本身正常：view_mode=preview 关闭后重开，
+  restore_session 正确恢复 preview（page_mode / 按钮 / meta 三者一致）。
+- 「不能编辑」未在探针中复现为数据层故障（editable/sensitive/insert 均
+  正常）；最可能机制：**启动恢复时窗口尚未显示，grab_focus 无效**，
+  重开后焦点不在编辑器，打字没反应；切一次模式时 set_mode 再次
+  grab_focus（此时窗口已 map）才生效。
+- 探针另核实：关闭流程不覆盖 view_mode；`window.set_mode` 只切当前页
+  （各页模式事实上独立），但恢复时被全局 view_mode 统一覆盖。
+
+### 三、实现
+
+- **每文档模式持久化**：meta key `mode:<doc_id>`。
+  - 写入：`window.set_mode()` 存当前页；`_persist_session()`（关闭）存
+    全部打开页。
+  - 恢复：`add_tab()` / `open_document()` 按 `mode:<doc_id>` 恢复各页
+    （缺省回退全局）；`restore_session()` 不再用全局 view_mode 覆盖全部
+    页，窗口模式/按钮跟随当前选中文档；`_on_selected_page()` 切标签时
+    窗口模式跟随该文档自己的模式（handler_block 防回环，不写全局
+    view_mode）。
+- **焦点补偿**：`restore_session()` 挂 map 信号，窗口首次显示后 idle
+  再 grab_focus 一次（`_on_map_focus_restore` / `_focus_current_view`，
+  预览模式与关闭中不抢）。
+
+### 四、测试证据
+
+- 两阶段探针（已按纪律用后即删）：恢复后 page_mode=preview、按钮
+  preview active；模拟点击编辑按钮后 editable=True、has_focus=True、
+  buffer 插入成功；map 后焦点补偿 `win_focus_is_view=True`。
+- 非 GUI 全量 **218 例 OK**。
+- 版本 1.16.4 → 1.16.5；构建 `dist/gscratchpad_1.16.5-1_all.deb`。
+
+### 五、残留说明
+
+- `window.set_mode` 在预览模式下也无条件 grab_focus（编辑器仍持窗口内
+  焦点），属现状行为，未改动。
+- 若用户实测仍出现「编辑模式但不可编辑」，下一层排查方向为真机 WM
+  焦点时序与 WebView 加载竞态（探针环境无法复现）。

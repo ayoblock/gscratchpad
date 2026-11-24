@@ -21,6 +21,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+from .clipboard import set_clipboard_utf8  # noqa: E402
 from . import fssearch, paths  # noqa: E402
 
 DISPLAY_LIMIT = 400          # 结果列表最多渲染多少行（防止界面卡顿）
@@ -274,9 +275,7 @@ class _HitRow(Gtk.Box):
             self.dialog.status.set_text(f"无法打开文件管理器：{exc.message}")
 
     def _copy_path(self) -> None:
-        display = Gdk.Display.get_default()
-        if display is not None:
-            display.get_clipboard().set(str(self.path))
+        set_clipboard_utf8(str(self.path))
 
 
 class FolderSearchDialog(_FolderDialog):

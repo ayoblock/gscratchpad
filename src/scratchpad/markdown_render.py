@@ -226,9 +226,25 @@ def _index_headings(body: str) -> str:
     return _HEADING_TAG_RE.sub(repl, body)
 
 
+# YAML frontmatter：必须是文档第一行起、以 --- 包围（或 ... 收尾）的块，
+# 闭合行后的空行一并吞掉。仅当首行是 --- 且能找到闭合行才剥离——正文中间
+# 的 --- （hr / setext 下划线）不受影响，未闭合的 --- 按普通分隔线渲染。
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(.*?\r?\n)?(?:---|\.\.\.)[ \t]*(?:\r?\n|$)", re.DOTALL
+)
+
+
+def _strip_frontmatter(text: str) -> str:
+    """剥离文档开头的 YAML frontmatter（预览 / PDF 导出不显示，编辑区原文不动）。"""
+    if not text.startswith("---"):
+        return text
+    m = _FRONTMATTER_RE.match(text)
+    return text[m.end():] if m else text
+
+
 def render_body(text: str) -> str:
     """Markdown 正文 → HTML 片段（不含 <html> 外壳）。"""
-    protected, store, diagrams = _preprocess(text)
+    protected, store, diagrams = _preprocess(_strip_frontmatter(text))
     _MD.reset()
     body = _MD.convert(protected)
     body = _extract_mermaid(body, diagrams)

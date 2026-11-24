@@ -25,6 +25,8 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
+from .clipboard import set_clipboard_utf8  # noqa: E402
+
 VIEW_NOTES = "notes"
 VIEW_FOLDERS = "folders"
 VIEW_DISK = "disk"
@@ -811,10 +813,8 @@ class Sidebar(Gtk.Box):
             )
 
     def _copy_to_clipboard(self, text: str) -> None:
-        display = Gdk.Display.get_default()
-        if display is None:
+        if not set_clipboard_utf8(text):
             return
-        display.get_clipboard().set(text)
         self.window.toast_overlay.add_toast(Adw.Toast(title="已复制", timeout=2))
 
     def _on_view_changed(self, stack, _param) -> None:

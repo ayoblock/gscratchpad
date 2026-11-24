@@ -119,7 +119,8 @@ class ContextTest:
 
         extra = self.page.view.get_extra_menu()
         self.out["extra_menu_set"] = extra is not None
-        self.out["extra_menu_items"] = extra is not None and extra.get_n_items() == 5
+        # 6 项：复制为其它编码、列编辑、格式化排版、简→繁、繁→简、折叠当前区块
+        self.out["extra_menu_items"] = extra is not None and extra.get_n_items() == 6
         self.s1_convert_selection()
         return False
 

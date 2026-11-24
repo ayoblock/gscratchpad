@@ -14,6 +14,7 @@ from gi.repository import Adw, Gdk, GLib, Gio, GObject, Gtk, GtkSource  # noqa: 
 
 from .preview import PreviewPane  # noqa: E402
 from .folding import FoldEngine, FoldGutter  # noqa: E402
+from .clipboard import set_clipboard_encoded, set_clipboard_utf8  # noqa: E402
 from . import columnedit  # noqa: E402
 from . import escapecodec  # noqa: E402
 from . import snippets  # noqa: E402
@@ -21,6 +22,9 @@ from . import snippets  # noqa: E402
 MODE_SOURCE = "source"
 MODE_SPLIT = "split"
 MODE_PREVIEW = "preview"
+
+# 右键「复制为其它编码」子菜单的选项（单一事实来源，菜单与测试共用）
+COPY_ENCODINGS = (("GBK", "gbk"), ("UTF-16", "utf-16"))
 
 # 写作模式：可选百分比与最小行宽（小窗口下防止文本被挤成几个字一行）
 WRITING_PCTS = (50, 75, 85)
@@ -165,8 +169,10 @@ class EditorPage(Gtk.Box):
         # 垂直滚动（adjustment 恒为 0）；Gtk.Box 内子控件 halign=CENTER 也不生效
         # （实测 x 恒为 0），只有两侧 hexpand 空白能真正均分剩余空间。
         self._writing_pct = 0
-        self._writing_state: tuple[bool, int] | None = None
+        self._writing_state_src: tuple[bool, int] | None = None
+        self._writing_state_prev: tuple[bool, int] | None = None
         self._writing_idle: int | None = None
+        self._writing_retries = 0
 
         # ---- 打字机模式：光标行固定于视口百分比处（滚动跟随）
         self._typewriter = False
@@ -218,12 +224,26 @@ class EditorPage(Gtk.Box):
         # ---- 预览
         self.preview = PreviewPane()
 
+        # ---- 预览区同样接入「设置宽度」：与 source_box 同构的居中布局，
+        # 设置宽度时预览 WebView 也收窄居中（方案 A，GTK 布局层）。
+        self.preview_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, hexpand=True, vexpand=True
+        )
+        self._preview_pad_left = Gtk.Box(hexpand=True)
+        self._preview_pad_right = Gtk.Box(hexpand=True)
+        self._preview_pad_left.set_visible(False)
+        self._preview_pad_right.set_visible(False)
+        self.preview_box.append(self._preview_pad_left)
+        self.preview_box.append(self.preview)
+        self.preview_box.append(self._preview_pad_right)
+        self.preview_box.connect("notify::width", self._on_source_width_changed)
+
         # ---- 布局：搜索栏在顶部，下方分屏
         self.append(self.search_bar)
 
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=460, hexpand=True, vexpand=True)
         self.paned.set_start_child(self.source_box)
-        self.paned.set_end_child(self.preview)
+        self.paned.set_end_child(self.preview_box)
         self.append(self.paned)
         self._preview_timer: int | None = None
         self.set_mode(MODE_SOURCE, initial=True)
@@ -243,6 +263,35 @@ class EditorPage(Gtk.Box):
     def snapshot_text(self) -> str:
         """全文（含已折叠内容）——保存/预览/统计/PDF 一律取这里。"""
         return self._folding.expand_text()
+
+    def copy_as_utf8_text(self) -> str:
+        """把当前选区（无选区则整篇）显式按 UTF-8 写入剪贴板，返回写入的文本。
+
+        与 GTK 内置 Ctrl+C 的差别：内置复制提供裸 text/plain，GNOME Shell 剪贴板
+        查看器等消费方按 Latin-1 解读时会把中文显示成 \\XX 转义；本方法显式提供
+        UTF8_STRING 目标，逐字节保真。
+        """
+        buf = self.buffer
+        bounds = buf.get_selection_bounds()
+        if bounds:
+            start, end = bounds
+            text = buf.get_text(start, end, False)
+        else:
+            text = self.snapshot_text()
+        set_clipboard_utf8(text)
+        return text
+
+    def copy_as_encoded(self, encoding: str) -> str:
+        """把选区（无选区则整篇）按指定编码写入剪贴板，返回写入的文本。"""
+        buf = self.buffer
+        bounds = buf.get_selection_bounds()
+        if bounds:
+            start, end = bounds
+            text = buf.get_text(start, end, False)
+        else:
+            text = self.snapshot_text()
+        set_clipboard_encoded(text, encoding)
+        return text
 
     def set_format(self, fmt: str) -> None:
         if fmt != self.format:
@@ -338,17 +387,19 @@ class EditorPage(Gtk.Box):
         self.mode = mode
         if mode == MODE_SOURCE:
             self.source_box.set_visible(True)
-            self.preview.set_visible(False)
+            self.preview_box.set_visible(False)
         elif mode == MODE_PREVIEW:
             self.source_box.set_visible(False)
-            self.preview.set_visible(True)
+            self.preview_box.set_visible(True)
             self.refresh_preview()
         else:  # split
             self.source_box.set_visible(True)
-            self.preview.set_visible(True)
+            self.preview_box.set_visible(True)
             self.refresh_preview()
         if not initial and mode != MODE_PREVIEW:
             self.view.grab_focus()
+        # 可见性切换后的首次宽度分配不触发 notify::width（实测），需补一次重算
+        self._kick_writing_apply()
 
     # ------------------------------------------------------------------ 写作模式
 
@@ -358,41 +409,66 @@ class EditorPage(Gtk.Box):
         self._apply_writing_width()
 
     def _apply_writing_width(self) -> None:
-        viewport_w = self.source_box.get_width()
+        self._apply_pane_width(
+            self.source_box, self.source_scroller, self._write_pad_left,
+            self._write_pad_right, key="_writing_state_src",
+        )
+        self._apply_pane_width(
+            self.preview_box, self.preview, self._preview_pad_left,
+            self._preview_pad_right, key="_writing_state_prev",
+        )
+
+    def _apply_pane_width(
+        self, pane: Gtk.Box, child: Gtk.Widget,
+        pad_left: Gtk.Box, pad_right: Gtk.Box, *, key: str,
+    ) -> None:
+        viewport_w = pane.get_width()
         if viewport_w <= 0:
             # 尚未布局：不缓存无效状态，等 map / 宽度变化时重算
-            self._writing_state = None
+            setattr(self, key, None)
             return
         target = writing_target_width(viewport_w, self._writing_pct)
         state = (target <= 0, target)
-        if state == self._writing_state:
+        if state == getattr(self, key):
             return
-        self._writing_state = state
+        setattr(self, key, state)
         on = target > 0
-        self._write_pad_left.set_visible(on)
-        self._write_pad_right.set_visible(on)
+        pad_left.set_visible(on)
+        pad_right.set_visible(on)
         if not on:
-            # 关闭：滚动区铺满编辑区，与原行为一致
-            self.source_scroller.set_hexpand(True)
-            self.source_scroller.set_size_request(-1, -1)
+            # 关闭：子区铺满编辑区，与原行为一致
+            child.set_hexpand(True)
+            child.set_size_request(-1, -1)
             return
-        self.source_scroller.set_hexpand(False)
-        self.source_scroller.set_size_request(target, -1)
+        child.set_hexpand(False)
+        child.set_size_request(target, -1)
 
     def _on_source_width_changed(self, *_args) -> None:
-        """编辑区宽度变化（窗口缩放 / 拖拽分屏）时按比例重算；延迟到 idle 避免布局中重排。"""
+        """编辑/预览区宽度变化（窗口缩放 / 拖拽分屏）时按比例重算；延迟到 idle 避免布局中重排。"""
         if self._writing_pct <= 0 or self._writing_idle is not None:
             return
         self._writing_idle = GLib.idle_add(self._apply_writing_idle)
 
+    def _kick_writing_apply(self, *_args) -> None:
+        """模式切换 / map 后补一次重算：首次宽度分配可能不触发 notify::width。"""
+        if self._writing_pct <= 0 or self._writing_idle is not None:
+            return
+        self._writing_idle = GLib.timeout_add(20, self._apply_writing_idle)
+
     def _on_page_mapped(self, *_args) -> None:
         """页面首次显示：此时才有真实宽度（新标签在未布局时设置会被跳过的补偿）。"""
-        if self._writing_pct > 0 and self._writing_idle is None:
-            self._writing_idle = GLib.idle_add(self._apply_writing_idle)
+        self._kick_writing_apply()
 
     def _apply_writing_idle(self) -> bool:
         self._writing_idle = None
         self._apply_writing_width()
+        # 可见区域还没拿到有效分配（刚显示，视口宽为 0）：再等一帧重试
+        pending = (self.source_box.get_visible() and self._writing_state_src is None) or (
+            self.preview_box.get_visible() and self._writing_state_prev is None
+        )
+        if pending and self._writing_retries < 30:
+            self._writing_retries += 1
+            self._writing_idle = GLib.timeout_add(20, self._apply_writing_idle)
         return False
 
     # ------------------------------------------------------------------ 打字机模式
@@ -1094,7 +1170,11 @@ class EditorPage(Gtk.Box):
         col.append("行排序", "win.sort-lines")
         col.append("去除重复行", "win.dedup-lines")
         col.append("按列提取（保留一列）…", "win.column-take")
+        enc = Gio.Menu()
+        for label, name in COPY_ENCODINGS:
+            enc.append(label, f"win.copy-as-encoding('{name}')")
         menu = Gio.Menu()
+        menu.append_submenu("复制为其它编码", enc)
         menu.append_submenu("列编辑", col)
         menu.append("格式化排版", "win.format-doc")
         menu.append("简体 → 繁体", "win.convert-s2t")

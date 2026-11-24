@@ -39,6 +39,7 @@ gi.require_version("WebKit", "6.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from scratchpad.application import ScratchpadApp  # noqa: E402
+from scratchpad.editor import MODE_PREVIEW, MODE_SOURCE  # noqa: E402
 
 TMP = Path(tempfile.mkdtemp(prefix="gscratchpad-writing-"))
 os.environ["XDG_DATA_HOME"] = str(TMP / "data")
@@ -74,15 +75,29 @@ class WritingTest:
 
     def _check_pct(self, page, pct: int, key: str) -> None:
         viewport = self._viewport(page)
-        expected = max(360, round(viewport * pct / 100))
-        actual = page.source_scroller.get_width()
-        self.out[f"{key}_viewport"] = viewport
-        self.out[f"{key}_expected"] = expected
-        self.out[f"{key}_actual"] = actual
-        self.out[f"{key}_width_ok"] = abs(actual - expected) <= 3
-        off = self._offset(page)
-        self.out[f"{key}_offset"] = off
-        self.out[f"{key}_centered"] = abs(off - (viewport - actual) / 2) <= 3
+        if page.source_box.get_visible():
+            expected = max(360, round(viewport * pct / 100))
+            actual = page.source_scroller.get_width()
+            self.out[f"{key}_viewport"] = viewport
+            self.out[f"{key}_expected"] = expected
+            self.out[f"{key}_actual"] = actual
+            self.out[f"{key}_width_ok"] = abs(actual - expected) <= 3
+            off = self._offset(page)
+            self.out[f"{key}_offset"] = off
+            self.out[f"{key}_centered"] = abs(off - (viewport - actual) / 2) <= 3
+        # 预览区（预览/分屏可见时）同样收窄居中
+        if page.preview_box.get_visible():
+            prev_viewport = page.preview_box.get_width()
+            prev_expected = max(360, round(prev_viewport * pct / 100))
+            prev_actual = page.preview.get_width()
+            ok, rect = page.preview.compute_bounds(page.preview_box)
+            prev_off = round(rect.get_x()) if ok else -1
+            self.out[f"{key}_prev_viewport"] = prev_viewport
+            self.out[f"{key}_prev_actual"] = prev_actual
+            self.out[f"{key}_prev_width_ok"] = abs(prev_actual - prev_expected) <= 3
+            self.out[f"{key}_prev_centered"] = (
+                abs(prev_off - (prev_viewport - prev_actual) / 2) <= 3
+            )
 
     # ------------------------------------------------------------------ 场景
 
@@ -155,6 +170,18 @@ class WritingTest:
 
     def s5_check(self) -> bool:
         self._check_pct(self.page, 85, "p85_resized")
+        # 切到实时预览模式：预览区也应收窄居中
+        self.page.set_mode(MODE_PREVIEW)
+        GLib.timeout_add(900, self.s5b_preview)
+        return False
+
+    def s5b_preview(self) -> bool:
+        self._check_pct(self.page, 85, "p85_preview")
+        self.page.set_mode(MODE_SOURCE)
+        GLib.timeout_add(300, self.s5c_second)
+        return False
+
+    def s5c_second(self) -> bool:
         # 第二个标签页同样受限
         second = self.app.window.new_tab()
         second.buffer.set_text(LONG)

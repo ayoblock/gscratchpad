@@ -22,7 +22,8 @@ from . import assets, columnedit, keymap, paths, snippets  # noqa: E402
 from .command_menu import Command, CommandMenu, CommandSection, format_accel  # noqa: E402
 from .editor import MODE_PREVIEW, MODE_SOURCE, MODE_SPLIT, EditorPage  # noqa: E402
 
-# 写作模式循环顺序：关闭 → 85% → 75% → 50% → 关闭（Ctrl+Shift+M）
+# 设置宽度循环顺序：关闭 → 85% → 75% → 50% → 关闭（Ctrl+Shift+M）
+# （内部标识沿用 writing_* 命名与 meta key，避免偏好迁移；源码/预览两区同时生效）
 WRITING_CYCLE = ("off", "85", "75", "50")
 # 打字机模式光标行位置候选（视口百分比，50=居中，33≈SoloMD 的 1/3 处）
 TYPEWRITER_ALIGNS = ("25", "33", "50", "66", "75")
@@ -74,7 +75,7 @@ SHORTCUTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("<Control><Shift>F", "在目录中搜索"),
             ("<Control><Shift>H", "目录批量替换"),
             ("<Control><Shift>P", "切换源码 / 预览"),
-            ("<Control><Shift>M", "写作模式：关闭 → 85% → 75% → 50% 循环"),
+            ("<Control><Shift>M", "设置宽度：关闭 → 85% → 75% → 50% 循环"),
             ("<Control><Shift>T", "打字机模式：光标行固定于视口百分比处（开 / 关）"),
             ("<Control><Shift>I", "格式化排版（JSON / XML / HTML / Python / Bash）"),
             ("", "列编辑：菜单「工具」（每行加前缀 / 后缀、行排序、去重）"),
@@ -212,6 +213,15 @@ class ScratchpadWindow(Adw.ApplicationWindow):
             return False
         if state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK):
             return False
+        if keyval in (Gdk.KEY_c, Gdk.KEY_C):
+            # Ctrl+C：窗口 CAPTURE 阶段抢在 GtkTextView 内置 text.copy-clipboard
+            # 之前，改走显式 UTF8_STRING，避免中文被消费方按 Latin-1 转成 \\XX。
+            # 仅拦截「焦点在编辑器且有选区」；无选区或焦点在搜索框等处交还内置行为。
+            page = self._current_page()
+            if page is not None and page.view.has_focus() and page.buffer.get_has_selection():
+                page.copy_as_utf8_text()
+                return True
+            return False
         if keyval in (Gdk.KEY_f, Gdk.KEY_F):
             page = self._current_page()
             if page is not None:
@@ -258,7 +268,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         # 写作模式：同一 linked 组内的下拉按钮（位于三态模式按钮之后、新建标签之前）
         self.writing_button = Gtk.MenuButton(
             icon_name="format-justify-center-symbolic",
-            tooltip_text="写作模式宽度：居中排版，Ctrl+Shift+M 循环切换",
+            tooltip_text="设置宽度：源码与预览居中排版，Ctrl+Shift+M 循环切换",
         )
         writing_menu = Gio.Menu()
         for label, value in (
@@ -304,7 +314,9 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         self.sidebar_button = Gtk.ToggleButton(
             icon_name="sidebar-show-symbolic",
             tooltip_text="显示 / 隐藏侧边栏（F9）",
-            active=self.store.get_meta("sidebar_visible", "1") != "0",
+            # 每次启动一律收起侧边栏，不记忆上次的展开状态；
+            # 用户可在应用内用 F9 / 头部按钮随时展开。
+            active=False,
         )
         self.sidebar_button.connect("toggled", self._on_sidebar_toggled)
         header_start = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -481,28 +493,28 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                     Command("分屏预览模式", "win.view-mode", MODE_SPLIT, keywords="split 分屏"),
                     Command("实时预览模式", "win.view-mode", MODE_PREVIEW, keywords="preview 预览"),
                     Command(
-                        "写作模式：关闭（满宽）",
+                        "设置宽度：关闭（满宽）",
                         "win.writing-mode",
                         "off",
-                        keywords="writing 写作 专注 居中 满宽 关闭",
+                        keywords="writing 写作 专注 居中 满宽 关闭 宽度 width",
                     ),
                     Command(
-                        "写作模式：居中 85%",
+                        "设置宽度：居中 85%",
                         "win.writing-mode",
                         "85",
-                        keywords="writing 写作 专注 居中 85",
+                        keywords="writing 写作 专注 居中 85 宽度 width",
                     ),
                     Command(
-                        "写作模式：居中 75%",
+                        "设置宽度：居中 75%",
                         "win.writing-mode",
                         "75",
-                        keywords="writing 写作 专注 居中 75",
+                        keywords="writing 写作 专注 居中 75 宽度 width",
                     ),
                     Command(
-                        "写作模式：居中 50%",
+                        "设置宽度：居中 50%",
                         "win.writing-mode",
                         "50",
-                        keywords="writing 写作 专注 居中 50",
+                        keywords="writing 写作 专注 居中 50 宽度 width",
                     ),
                     Command(
                         "打字机模式：光标行固定跟随（开 / 关）",
@@ -642,6 +654,15 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         )
         add("find", lambda *_: self._current_page() and self._current_page().show_search(False))
         add("replace", lambda *_: self._current_page() and self._current_page().show_search(True))
+        add(
+            "copy-as-encoding",
+            lambda _a, value: (
+                self._current_page().copy_as_encoded(value.get_string())
+                if self._current_page() is not None
+                else None
+            ),
+            GLib.VariantType.new("s"),
+        )
         add("fs-search", lambda *_: self.open_folder_search())
         add("fs-replace", lambda *_: self.open_folder_replace())
         add("save-now", lambda *_: self.save_active_now())
@@ -898,7 +919,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         page = EditorPage()
         page.load_document(doc.id, doc.title, doc.format, doc.content, doc.revision)
         self._configure_page_for_source(page)
-        page.set_mode(self.mode, initial=True)
+        page.set_mode(self._doc_mode_of(doc.id), initial=True)
         page.set_scheme(Adw.StyleManager.get_default().get_dark())
         page.set_writing_width(self._writing_pct())
         self._apply_typewriter_state(page)
@@ -977,6 +998,13 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                 self._save_cursor(self._pages.get(previous))
             self._active_doc_id = page.doc_id
             self.store.set_meta("active_doc", page.doc_id)
+            # 切换标签：窗口模式跟随该文档自己的模式（各页模式独立）
+            if page.mode != self.mode:
+                self.mode = page.mode
+                for name, button in self._mode_buttons.items():
+                    blocked = button.handler_block_by_func(self._on_mode_toggled)
+                    button.set_active(name == page.mode)
+                    button.handler_unblock_by_func(self._on_mode_toggled)
             self._update_stats(page)
             self._update_format_button(page)
             self._sync_undo_buttons(page)
@@ -1099,6 +1127,20 @@ class ScratchpadWindow(Adw.ApplicationWindow):
     def _cursor_key(doc_id: str) -> str:
         return f"cursor:{doc_id}"
 
+    @staticmethod
+    def _mode_key(doc_id: str) -> str:
+        """每文档模式持久化 key：重开应用恢复该文档关闭时的模式。"""
+        return f"mode:{doc_id}"
+
+    def _doc_mode_of(self, doc_id: str) -> str:
+        saved = self.store.get_meta(self._mode_key(doc_id), self.mode)
+        return saved if saved in (MODE_SOURCE, MODE_SPLIT, MODE_PREVIEW) else self.mode
+
+    def _save_doc_mode(self, page: EditorPage | None) -> None:
+        if page is None or not page.doc_id:
+            return
+        self.store.set_meta(self._mode_key(page.doc_id), page.mode)
+
     def _save_cursor(self, page: EditorPage | None, *, wait: bool = True) -> None:
         if page is None or not page.doc_id:
             return
@@ -1176,6 +1218,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         if page is not None:
             page.set_mode(mode)
             page.view.grab_focus()
+            self._save_doc_mode(page)
 
     def toggle_source_preview(self) -> None:
         self.set_mode(MODE_PREVIEW if self.mode != MODE_PREVIEW else MODE_SOURCE)
@@ -1322,9 +1365,9 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         self.sidebar_button.set_active(not self.sidebar_button.get_active())
 
     def hide_sidebar(self) -> None:
-        """收起侧栏，但不改写用户偏好（sidebar_visible 保持原值）。
+        """收起侧栏，但不改写偏好值（sidebar_visible 保持原值）。
 
-        自动隐藏属于一次性动作：用户下次启动仍应按自己的偏好恢复侧栏。
+        自动隐藏属于一次性动作；侧栏启动状态固定为收起，不读取该偏好。
         """
         if not self.sidebar_visible() and not self.sidebar_button.get_active():
             return
@@ -2248,7 +2291,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         page = EditorPage()
         page.load_document(doc.id, doc.title, doc.format, doc.content, doc.revision)
         self._configure_page_for_source(page)
-        page.set_mode(self.mode, initial=True)
+        page.set_mode(self._doc_mode_of(doc.id), initial=True)
         page.set_scheme(Adw.StyleManager.get_default().get_dark())
         page.set_writing_width(self._writing_pct())
         self._apply_typewriter_state(page)
@@ -2516,9 +2559,31 @@ class ScratchpadWindow(Adw.ApplicationWindow):
                 break
         if not selected:
             self.tabview.set_selected_page(self.tabview.get_nth_page(0))
-        mode = self.store.get_meta("view_mode", MODE_SOURCE)
-        self.set_mode(mode if mode in (MODE_SOURCE, MODE_SPLIT, MODE_PREVIEW) else MODE_SOURCE)
+        # 每文档模式：各页已在 add_tab 时按 mode:<doc_id> 恢复；
+        # 窗口模式 / 按钮跟随当前选中文档，不再用全局 view_mode 覆盖全部页。
+        tab = self.tabview.get_selected_page()
+        page = tab.get_child() if tab is not None else None
+        if page is not None:
+            self.set_mode(page.mode)
+        # 启动恢复时窗口尚未显示，grab_focus 无效 → 重开后打字没反应（需切
+        # 一次模式才激活）。窗口首次显示后再补一次焦点。
+        self._focus_after_map = True
+        self.connect("map", self._on_map_focus_restore)
         return notes
+
+    def _on_map_focus_restore(self, *_args) -> None:
+        if not getattr(self, "_focus_after_map", False):
+            return
+        self._focus_after_map = False
+        GLib.idle_add(self._focus_current_view)
+
+    def _focus_current_view(self) -> bool:
+        if self._closing:
+            return False
+        page = self._current_page()
+        if page is not None and self.mode != MODE_PREVIEW:
+            page.view.grab_focus()
+        return False
 
     def _persist_session(self) -> None:
         width, height = self.get_default_size()
@@ -2530,6 +2595,7 @@ class ScratchpadWindow(Adw.ApplicationWindow):
             self.store.set_meta("active_doc", page.doc_id)
         for item in self._pages.values():
             self._save_cursor(item)
+            self._save_doc_mode(item)
 
     def _on_close_request(self, _window) -> bool:
         if self._closing:

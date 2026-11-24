@@ -44,7 +44,7 @@ LABELS: dict[str, str] = {
     "win.open-file": "打开本机文件",
     "win.save-file": "保存到本机文件",
     "win.toggle-mode": "切换源码 / 预览",
-    "win.cycle-writing-mode": "循环切换写作模式宽度",
+    "win.cycle-writing-mode": "循环切换设置宽度",
     "win.toggle-typewriter": "打字机模式（光标行固定于视口百分比处）",
     "win.format-doc": "格式化排版",
     "win.rename-tab": "重命名标签",
