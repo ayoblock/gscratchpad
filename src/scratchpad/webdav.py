@@ -117,6 +117,16 @@ class WebDavClient:
 
     # ------------------------------------------------------------------ 操作
 
+    @staticmethod
+    def _http_error(action: str, status: int) -> "WebDavError":
+        """HTTP 错误统一文案；401 单独提示认证问题（密码未填/错误最常见）。"""
+        if status == 401:
+            return WebDavError(
+                f"{action}失败 HTTP 401：认证被拒，请检查用户名与密码（密码未填也会报此错）",
+                status,
+            )
+        return WebDavError(f"{action}失败 HTTP {status}", status)
+
     def put(self, path: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         """上传；2xx 即成功，其余抛 WebDavError。"""
         status, _, _ = self._request_retry(
@@ -126,13 +136,13 @@ class WebDavClient:
             headers={"Content-Type": content_type},
         )
         if not 200 <= status <= 299:
-            raise WebDavError(f"上传失败 HTTP {status}", status)
+            raise self._http_error("上传", status)
 
     def get(self, path: str) -> bytes:
         """下载；404 返回 None 之外统一抛错（调用方用 exists/head 区分）。"""
         status, body, _ = self._request_retry("GET", join_url(self.base, path))
         if not 200 <= status <= 299:
-            raise WebDavError(f"下载失败 HTTP {status}", status)
+            raise self._http_error("下载", status)
         return body
 
     def get_optional(self, path: str) -> bytes | None:
@@ -141,7 +151,7 @@ class WebDavClient:
         if status == 404:
             return None
         if not 200 <= status <= 299:
-            raise WebDavError(f"下载失败 HTTP {status}", status)
+            raise self._http_error("下载", status)
         return body
 
     def head_size(self, path: str) -> int:
@@ -171,7 +181,13 @@ class WebDavClient:
             if status not in (200, 201, 405):
                 # 已存在还可能表现为 301/409，放宽到 4xx 内除 401/403 外不阻断
                 if status in (401, 403):
-                    raise WebDavError(f"创建目录被拒 HTTP {status}", status)
+                    if status == 401:
+                        raise self._http_error("创建目录", status)
+                    raise WebDavError(
+                        "创建目录被拒 HTTP 403：服务器拒绝了写权限"
+                        "（请在 AList/OpenList 管理页给该用户勾选 WebDAV 写入权限）",
+                        status,
+                    )
 
     def propfind_children(self, path: str) -> list[str]:
         """Depth:1 枚举子项名。返回第一层子目录/文件的名字列表（URL 解码后）。"""
@@ -188,7 +204,7 @@ class WebDavClient:
         if status == 404:
             return []
         if not (200 <= status <= 299 or status == 207):
-            raise WebDavError(f"列目录失败 HTTP {status}", status)
+            raise self._http_error("列目录", status)
         return _parse_propfind_names(data.decode("utf-8", "replace"), posixpath.basename(path))
 
 

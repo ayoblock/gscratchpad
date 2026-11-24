@@ -1,16 +1,27 @@
 package io.github.gscratchpad.platform
 
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URI
 import java.net.URL
 import java.util.Base64
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * WebDAV 通用客户端（sync v1，语义规约 docs/SYNC_PROTOCOL.md §8）。
  *
  * 与 [CloudBackup] 的固定文件传输互补：这里提供 put/get/headSize/mkcolDeep/
  * propfindChildren 通用方法，供 SyncEngine 按设备目录读写 manifest/docs.zip/
- * assets。标准 HttpURLConnection，无新增依赖；超时与重试对齐 R35。
+ * assets。PUT/GET/HEAD 走 HttpURLConnection；MKCOL/PROPFIND 因 Android
+ * 的方法白名单改走原生 socket（见 [rawRequest]），无新增依赖；超时与重试对齐 R35。
  *
  * 地址允许内嵌用户名 `http://user@host/path`（与桌面版一致），解析后拆为
  * 独立 user 字段；密码单独传入。
@@ -72,7 +83,25 @@ class SyncDav(baseUrl: String, user: String, password: String) : DavOps {
             token?.let { setRequestProperty("Authorization", "Basic $it") }
         }
 
-    private fun request(method: String, url: String, body: ByteArray?, contentType: String?): Pair<Int, ByteArray> {
+    /**
+     * MKCOL/PROPFIND 不在 Android HttpURLConnection 允许的方法集合内
+     * （真机报 "expected one of [options,get,head,post,put,delete,trace,patch] but was mkcol"），
+     * 因此这两个方法改走原生 socket；其余标准方法仍用 HttpURLConnection。
+     */
+    private fun request(method: String, url: String, body: ByteArray?, contentType: String?): Pair<Int, ByteArray> =
+        try {
+            if (method == "MKCOL" || method == "PROPFIND") {
+                rawRequest(method, url, body, contentType)
+            } else {
+                httpRequest(method, url, body, contentType)
+            }
+        } catch (e: SyncDavException) {
+            throw e
+        } catch (e: IOException) {
+            throw SyncDavException("网络错误：${e.message}", 0)
+        }
+
+    private fun httpRequest(method: String, url: String, body: ByteArray?, contentType: String?): Pair<Int, ByteArray> {
         var conn: HttpURLConnection? = null
         return try {
             conn = connect(method, url)
@@ -86,11 +115,133 @@ class SyncDav(baseUrl: String, user: String, password: String) : DavOps {
             val stream = if (code in 200..399) conn.inputStream else conn.errorStream
             val data = stream?.use { it.readBytes() } ?: ByteArray(0)
             code to data
-        } catch (e: IOException) {
-            throw SyncDavException("网络错误：${e.message}", 0)
         } finally {
             conn?.disconnect()
         }
+    }
+
+    /** 用裸 socket 发送一个 HTTP/1.1 请求并读回状态码与响应体。 */
+    private fun rawRequest(method: String, url: String, body: ByteArray?, contentType: String?): Pair<Int, ByteArray> {
+        val uri = URI(url)
+        val host = uri.host ?: throw IOException("WebDAV 地址缺少主机名：$url")
+        val secure = uri.scheme == "https"
+        val port = if (uri.port >= 0) uri.port else if (secure) 443 else 80
+        val target = (uri.rawPath?.takeIf { it.isNotEmpty() } ?: "/") +
+            (uri.rawQuery?.let { "?$it" } ?: "")
+        val payload = body ?: ByteArray(0)
+        val authority = if (port == 80 || port == 443) host else "$host:$port"
+
+        val head = StringBuilder().apply {
+            append(method).append(' ').append(target).append(" HTTP/1.1\r\n")
+            append("Host: ").append(authority).append("\r\n")
+            token?.let { append("Authorization: Basic ").append(it).append("\r\n") }
+            if (contentType != null) append("Content-Type: ").append(contentType).append("\r\n")
+            if (method == "PROPFIND") append("Depth: 1\r\n")
+            append("Content-Length: ").append(payload.size).append("\r\n")
+            append("Connection: close\r\n\r\n")
+        }.toString().toByteArray(Charsets.ISO_8859_1)
+
+        val socket: Socket = if (secure) sslSocket(host, port) else Socket()
+        return try {
+            if (!secure) socket.connect(InetSocketAddress(host, port), 12_000)
+            socket.soTimeout = 30_000
+            val out = socket.getOutputStream()
+            out.write(head)
+            if (payload.isNotEmpty()) out.write(payload)
+            out.flush()
+
+            val input = BufferedInputStream(socket.getInputStream())
+            var code: Int
+            var headers: Map<String, String>
+            while (true) {
+                val status = readAsciiLine(input) ?: throw IOException("WebDAV 响应为空")
+                code = Regex("HTTP/\\d(?:\\.\\d)?\\s+(\\d{3})").find(status)
+                    ?.groupValues?.get(1)?.toIntOrNull()
+                    ?: throw IOException("WebDAV 响应格式异常：$status")
+                headers = readHeaders(input)
+                if (code != 100) break // 100 Continue 后还有正式响应
+            }
+            code to readBody(input, code, headers)
+        } finally {
+            socket.close()
+        }
+    }
+
+    private fun sslSocket(host: String, port: Int): SSLSocket {
+        val socket = SSLSocketFactory.getDefault().createSocket() as SSLSocket
+        socket.connect(InetSocketAddress(host, port), 12_000)
+        val params = SSLParameters().apply {
+            endpointIdentificationAlgorithm = "HTTPS"
+            // IP 字面量不能作为 SNI 主机名
+            if (!Regex("^\\d+(\\.\\d+){3}$").matches(host) && !host.contains(':')) {
+                try { serverNames = listOf(SNIHostName(host)) } catch (_: IllegalArgumentException) { }
+            }
+        }
+        socket.sslParameters = params
+        socket.startHandshake()
+        return socket
+    }
+
+    private fun readAsciiLine(input: InputStream): String? {
+        val buf = ByteArrayOutputStream()
+        while (true) {
+            when (val b = input.read()) {
+                -1 -> return if (buf.size() == 0) null else buf.toString("ISO-8859-1")
+                '\r'.code -> {
+                    if (input.read() != '\n'.code) throw IOException("WebDAV 响应行缺少 LF")
+                    return buf.toString("ISO-8859-1")
+                }
+                else -> buf.write(b)
+            }
+        }
+    }
+
+    private fun readHeaders(input: InputStream): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        while (true) {
+            val line = readAsciiLine(input) ?: throw IOException("WebDAV 响应头提前结束")
+            if (line.isEmpty()) return map
+            val i = line.indexOf(':')
+            if (i > 0) map[line.substring(0, i).trim().lowercase()] = line.substring(i + 1).trim()
+        }
+    }
+
+    private fun readBody(input: InputStream, code: Int, headers: Map<String, String>): ByteArray {
+        if (headers["transfer-encoding"]?.lowercase()?.contains("chunked") == true) return readChunked(input)
+        val length = headers["content-length"]?.toLongOrNull()
+        if (length != null) return readExactly(input, length.toInt())
+        if (code in 100..199 || code == 204 || code == 304) return ByteArray(0)
+        return input.readBytes()
+    }
+
+    private fun readChunked(input: InputStream): ByteArray {
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val line = readAsciiLine(input) ?: throw IOException("chunked 响应提前结束")
+            val size = line.substringBefore(';').trim().toIntOrNull(16)
+                ?: throw IOException("chunked 长度非法：$line")
+            if (size == 0) {
+                while (true) {
+                    val trailer = readAsciiLine(input) ?: break
+                    if (trailer.isEmpty()) break
+                }
+                break
+            }
+            out.write(readExactly(input, size))
+            readAsciiLine(input) // chunk 末尾 CRLF
+        }
+        return out.toByteArray()
+    }
+
+    private fun readExactly(input: InputStream, size: Int): ByteArray {
+        val buf = ByteArray(size)
+        var off = 0
+        while (off < size) {
+            val n = input.read(buf, off, size - off)
+            if (n < 0) throw IOException("WebDAV 响应体提前结束")
+            off += n
+        }
+        return buf
     }
 
     private fun requestRetry(method: String, url: String, body: ByteArray? = null, contentType: String? = null): Pair<Int, ByteArray> {

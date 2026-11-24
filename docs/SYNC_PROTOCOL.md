@@ -1,6 +1,6 @@
 # GScratchpad 云同步协议（sync v1）
 
-状态：active（2026-11-25） · 适用：桌面 ≥1.17.0 / Android ≥0.9.1 · 传输：WebDAV
+状态：active（2026-11-25） · 适用：桌面 ≥1.17.0 / Android ≥0.9.2 · 传输：WebDAV
 
 > **Android 0.9.1 相对 v1 基线语义的三处调整（用户拍板）**：① 冲突败者由 `recovery/`
 > 纯文本改为**可编辑冲突文档**（§7）；② 冲突裁决由纯 `updated_at` 改为
@@ -152,6 +152,13 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
 ## 8. 传输要求
 
 - 方法：PUT / GET / HEAD / PROPFIND（Depth:1）/ MKCOL；Basic 认证。
+- **Android 0.9.2 传输实现修正**：`HttpURLConnection.setRequestMethod()` 在 Android 上
+  仅接受 OPTIONS/GET/HEAD/POST/PUT/DELETE/TRACE/PATCH，MKCOL/PROPFIND 会直接抛
+  `ProtocolException`（真机报 `expected one of [...] but was mkcol`），导致「立即同步」
+  在首个 MKCOL 即失败、而仅用 PUT/GET 的整包上传正常。现 MKCOL/PROPFIND 改走原生
+  socket（http/https 均支持，含 SNI/主机名校验、Basic 认证、100-Continue、
+  chunked/Content-Length 响应体解析），PUT/GET/HEAD 仍走 HttpURLConnection；
+  协议语义与 wire format 不变，桌面端实现不受影响。
 - URL 允许内嵌用户名 `http://user@host/path`，解析后拆为独立 user 字段；
   密码单独存储（桌面 libsecret 优先、meta 明文回退；Android SharedPreferences，
   与 R35 现状一致）。
@@ -178,11 +185,14 @@ assets 不进 docs.zip：逐文件 PUT 到 `assets/<docId>/<name>`，文件名�
 - 桌面：`src/scratchpad/syncengine.py` + `webdav.py`（v1.17.0 落地）。
 - Android：`platform/SyncDav.kt` + `platform/SyncEngine.kt`（0.9.0 落地，
   引擎经 `DavOps` 接口解耦以便 JVM 测试注入内存传输）；0.9.1 增量落地冲突文档 /
-  deviceId 元组裁决 / 墓碑 90 天清理（见文首三处调整说明）。
+  deviceId 元组裁决 / 墓碑 90 天清理（见文首三处调整说明）；0.9.2 修正
+  `SyncDav` 的 MKCOL/PROPFIND 传输路径（见 §8），新增 `SyncDavRawTest`
+  以本地 HTTP 服务端覆盖这两条非标准方法。
 - 夹具：桌面 `tests/test_sync_merge.py`（SM-01…SM-11）= Android
   `SyncEngineTest` 同名场景，逐字段对应。
-- 已验证：桌面 239 例、Android 225 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
-  tombstone TTL；改 1 例：冲突败者改为可编辑文档）；真实 AList 服务器
+- 已验证：桌面 239 例、Android 227 例全绿（0.9.1 增 2 例：SM-06b 元组裁决、
+  tombstone TTL，改 1 例：冲突败者改为可编辑文档；0.9.2 增 `SyncDavRawTest` 2 例）；
+  真实 AList 服务器
   （`http://10.42.239.55:5244/dav/hdd/test`）双设备 E2E 全过：
   推→拉→互改→冲突 updated_at 新者胜+败者保全→删除传播→删除正文保全。
   已知实现细节：败者保全发生在「持有败者内容的一侧」（若败者此前已推送，
