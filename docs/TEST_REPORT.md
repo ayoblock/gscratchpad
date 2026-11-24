@@ -2016,3 +2016,28 @@ v1.14.1（重做事件链路）、v1.14.2（补右键菜单）两次尝试后，
   release APK（upload key，SHA-256 指纹与登记一致）：
   `scratchpad-arm64-v8a-release-0.9.0.apk`、`scratchpad-x86_64-release-0.9.0.apk`。
 - 真机安装回归未执行（无连接设备）；UI 观感（云对话框新开关/按钮）待真机目视。
+
+## 修订三十九（v1.17.1）：标题栏「同步」按钮
+
+**日期**：2026-11-25　**范围**：桌面
+
+### 一、功能内容
+
+- 标题栏右上「主题」与「查找」之间新增「同步」按钮（`emblem-synchronizing-symbolic`），
+  点击触发 `win.cloud-sync-now`（与命令菜单「立即同步」同一动作）。
+- 最近一次云任务状态（同步/备份结果、错误）除 toast 外同步写入按钮 tooltip，
+  悬停即可回看上次结果。
+- 打包顺序说明：`pack_end` 从右到左为 菜单 → 查找 → 同步 → 主题，
+  视觉左到右即 主题 → 同步 → 查找 → 菜单。
+
+### 二、测试证据
+
+- `tests/test_cloud_gui.py` 新增两条断言：标题栏三按钮 x 坐标
+  主题 < 同步 < 查找（`compute_bounds` 元组取 origin_x）；初始 tooltip
+  为「立即同步（WebDAV）」。冒烟全项 true（含 dialog_fully_built 等原有项）。
+- 全量回归 **239 例 OK**（`/usr/bin/python3 -m unittest discover -s tests`）。
+
+### 三、版本与产物
+
+- 桌面 1.17.0 → **1.17.1**；`dist/gscratchpad_1.17.1-1_all.deb`。
+- Android 本轮无代码改动，维持 0.9.0/versionCode 47，不出包。

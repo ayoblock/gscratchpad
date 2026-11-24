@@ -68,6 +68,23 @@ class CloudGuiTest:
                 "cloud-import-backup",
             )
         )
+        # 标题栏「同步」按钮：位于主题与查找之间
+        # GTK HeaderBar 不便枚举 pack_end 顺序，改按按钮横向位置断言：
+        # 主题按钮 x 坐标 < 同步按钮 x 坐标 < 查找按钮 x 坐标
+        header = w.sync_button.get_parent()
+        tb, sb, fb = w.theme_button, w.sync_button, w.find_button
+        def _x(btn):
+            try:
+                # PyGObject 返回 (rect, origin_x, origin_y) 元组
+                r = btn.compute_bounds(header)
+                return r[1]
+            except Exception:  # noqa: BLE001
+                return None
+        xs = [_x(tb), _x(sb), _x(fb)]
+        self.out["header_order_ok"] = (
+            None not in xs and xs[0] < xs[1] < xs[2]
+        )
+        self.out["sync_tooltip"] = sb.get_tooltip_text()
         self.at(0.3, self.s1_delete_tombstone)
 
     def s1_delete_tombstone(self) -> None:

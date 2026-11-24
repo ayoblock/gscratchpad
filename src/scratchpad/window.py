@@ -390,6 +390,16 @@ class ScratchpadWindow(Adw.ApplicationWindow):
         self.find_button.connect("clicked", lambda *_: self.activate_action("win.find", None))
         header.pack_end(self.find_button)
 
+        # 立即同步入口（位于主题与查找之间）：触发 win.cloud-sync-now，
+        # 最近一次同步状态写入 tooltip，鼠标可达、无需开命令菜单
+        self.sync_button = Gtk.Button(
+            icon_name="emblem-synchronizing-symbolic", tooltip_text="立即同步（WebDAV）"
+        )
+        self.sync_button.connect(
+            "clicked", lambda *_: self.activate_action("win.cloud-sync-now", None)
+        )
+        header.pack_end(self.sync_button)
+
         # 日间 / 夜间主题切换（持久化到 meta，重启后保持）
         self.theme_button = Gtk.Button(
             icon_name="weather-clear-night-symbolic", tooltip_text="切换到夜间主题"
@@ -2822,9 +2832,11 @@ class ScratchpadWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------ 云备份 / 云同步
 
     def _on_cloud_status(self, text: str) -> None:
-        """云任务状态回调（工作线程内触发）→ 主线程 toast。"""
+        """云任务状态回调（工作线程内触发）→ 主线程 toast + 标题栏同步按钮 tooltip。"""
         def show() -> bool:
             self.toast_overlay.add_toast(Adw.Toast(title=text, timeout=5))
+            if getattr(self, "sync_button", None) is not None:
+                self.sync_button.set_tooltip_text(f"同步：{text}")
             return False
         GLib.idle_add(show)
 
