@@ -18,8 +18,8 @@ tasks.withType<Test>().configureEach {
 }
 
 /** 发版版本号唯一来源：defaultConfig 与 release 产物命名共用，避免两处漂移。 */
-val appVersionName = "0.9.4"
-val appVersionCode = 51
+val appVersionName = "0.9.8"
+val appVersionCode = 55
 
 /** CI / 发版机注入 upload key：android/keystore.properties（不入库）。 */
 val keystoreProps = Properties().apply {

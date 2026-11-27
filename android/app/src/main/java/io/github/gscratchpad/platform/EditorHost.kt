@@ -1,7 +1,15 @@
 package io.github.gscratchpad.platform
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Color
+import android.util.AttributeSet
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -9,6 +17,64 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.webkit.WebViewAssetLoader
 import org.json.JSONObject
+
+/**
+ * 保留 WebView 原生长按选词与拖手柄，只隐藏系统 ActionMode 菜单（复制/全选等），
+ * 动作统一由页内选区浮栏承载，避免「系统菜单 + 浮栏」双弹。
+ *
+ * 关键：不能 menu.clear()——WebView 发现菜单为空会立即 finish ActionMode 并清空 DOM 选区，
+ * 导致浮栏永远来不及显示（R53 实测根因）。保留条目、仅设不可见即可。
+ */
+private class SelectionMenuCallback(private val delegate: ActionMode.Callback) : ActionMode.Callback {
+    private fun hideItems(menu: Menu) {
+        for (i in 0 until menu.size()) menu.getItem(i).isVisible = false
+    }
+
+    override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+        if (!delegate.onCreateActionMode(mode, menu)) return false
+        hideItems(menu)
+        return true
+    }
+
+    override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+        delegate.onPrepareActionMode(mode, menu)
+        hideItems(menu)
+        return true
+    }
+
+    override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean =
+        delegate.onActionItemClicked(mode, item)
+
+    override fun onDestroyActionMode(mode: ActionMode) {
+        delegate.onDestroyActionMode(mode)
+    }
+}
+
+/** R53：编辑器专用 WebView，接管 ActionMode 回调以隐藏系统菜单但保留原生手柄。 */
+class EditorWebView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+) : WebView(context, attrs) {
+    override fun startActionMode(callback: ActionMode.Callback?): ActionMode? {
+        return super.startActionMode(callback?.let(::SelectionMenuCallback))
+    }
+
+    override fun startActionMode(callback: ActionMode.Callback?, type: Int): ActionMode? {
+        return super.startActionMode(callback?.let(::SelectionMenuCallback), type)
+    }
+
+    override fun startActionModeForChild(
+        originalView: View?, callback: ActionMode.Callback?,
+    ): ActionMode? {
+        return super.startActionModeForChild(originalView, callback?.let(::SelectionMenuCallback))
+    }
+
+    override fun startActionModeForChild(
+        originalView: View?, callback: ActionMode.Callback?, type: Int,
+    ): ActionMode? {
+        return super.startActionModeForChild(originalView, callback?.let(::SelectionMenuCallback), type)
+    }
+}
 
 /**
  * 编辑器宿主（路线 D）：WebView 内跑 CodeMirror 6，Kotlin 侧只做文档装载与事件编排。
@@ -29,6 +95,8 @@ class EditorHost(private val webView: WebView) {
     var onSwitchDocById: (String) -> Unit = {}
     /** 页内设置面板改动后回传（JSON：fontSize / lineHeight / wrap），宿主负责持久化。 */
     var onPrefsChanged: (String) -> Unit = {}
+    /** R52：选区变化回传（JSON：from/to/empty/text/line/column）。 */
+    var onSelectionChanged: (String) -> Unit = {}
 
     private val assetLoader: WebViewAssetLoader = WebViewAssetLoader.Builder()
         .addPathHandler("/static/", WebViewAssetLoader.AssetsPathHandler(webView.context))
@@ -130,6 +198,19 @@ class EditorHost(private val webView: WebView) {
                     // 必须显式限定外部类：匿名对象内同名调用会解析成自调用（递归 post）
                     webView.post { this@EditorHost.onPrefsChanged(json) }
                 }
+
+                @JavascriptInterface
+                fun onSelection(json: String) {
+                    webView.post { this@EditorHost.onSelectionChanged(json) }
+                }
+
+                @JavascriptInterface
+                fun copy(text: String) {
+                    webView.post {
+                        val cm = webView.context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        cm?.setPrimaryClip(ClipData.newPlainText("gscratchpad", text))
+                    }
+                }
             },
             "AndroidEditor",
         )
@@ -186,6 +267,40 @@ class EditorHost(private val webView: WebView) {
 
     fun insert(text: String) {
         webView.evaluateJavascript("window.NativeEditor.insert(${JSONObject.quote(text)})", null)
+    }
+
+    /** R52：从系统剪贴板读文本，再复用 CM 当前选区插入（粘贴链路不依赖 JS 权限）。 */
+    fun paste() {
+        val cm = webView.context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        val clip = cm.primaryClip ?: return
+        if (clip.itemCount == 0) return
+        val item = clip.getItemAt(0)
+        val text = item.text?.toString() ?: item.coerceToText(webView.context).toString()
+        if (text.isNotEmpty()) insert(text)
+    }
+
+    fun copySelection() {
+        webView.evaluateJavascript("window.NativeEditor.copySelection()", null)
+    }
+
+    fun cutSelection() {
+        webView.evaluateJavascript("window.NativeEditor.cutSelection()", null)
+    }
+
+    fun selectAll() {
+        webView.evaluateJavascript("window.NativeEditor.selectAll()", null)
+    }
+
+    fun undo() {
+        webView.evaluateJavascript("window.NativeEditor.undo()", null)
+    }
+
+    fun redo() {
+        webView.evaluateJavascript("window.NativeEditor.redo()", null)
+    }
+
+    fun selfCheckEdit() {
+        webView.evaluateJavascript("window.NativeEditor.selfCheckEdit()", null)
     }
 
     /** 诊断钩子：持续注入中文，验证中文渲染/防抖/落盘链路（替代无法自动化的 IME 组合态）。 */

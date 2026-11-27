@@ -50,4 +50,14 @@ class EditorActionsTest {
         assertEquals("预览", EditorActions.find("preview")?.label)
         assertNull(EditorActions.find("missing"))
     }
+
+    @Test
+    fun R54撤销重做不进命令面板() {
+        val ids = EditorActions.all.map { it.id }
+        assertTrue("undo 不应出现在命令面板（编辑栏承载）", !ids.contains("undo"))
+        assertTrue("redo 不应出现在命令面板（编辑栏承载）", !ids.contains("redo"))
+        listOf("copy", "cut", "paste", "selectAll").forEach {
+            assertTrue("缺少动作 $it", ids.contains(it))
+        }
+    }
 }

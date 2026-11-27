@@ -446,7 +446,7 @@ class MainActivity : ComponentActivity() {
      * 打开文档只剩 setDoc 的成本。WebView 与 Activity 同生命周期，不再整页重载。
      */
     private fun setupEditorOverlay() {
-        val view = android.webkit.WebView(this)
+        val view = io.github.gscratchpad.platform.EditorWebView(this)
         view.setBackgroundColor(0xFFFFFFFF.toInt())
         // panel 是独立子窗口，BACK 不经过 Activity.dispatchKeyEvent，必须在这里转发给 dispatcher
         view.setOnKeyListener { _, keyCode, event ->
@@ -522,6 +522,9 @@ class MainActivity : ComponentActivity() {
         }
         host.onPrefsChanged = { json ->
             runCatching { saveEditorPrefs(json) }
+        }
+        host.onSelectionChanged = { json ->
+            android.util.Log.d("Gscratchpad", "editor selection $json")
         }
         host.onAction = ::onEditorAction
         // R41：目录里未入库的文件用 file: 虚拟 id，点选时按需导入再打开；已入库的走原切换。
@@ -773,6 +776,13 @@ class MainActivity : ComponentActivity() {
             "fold" -> editorHost?.foldAtCursor()
             "foldAll" -> editorHost?.foldAll()
             "unfoldAll" -> editorHost?.unfoldAll()
+            // R52 选区浮栏 / 命令面板共用的编辑动作
+            "copy" -> editorHost?.copySelection()
+            "cut" -> editorHost?.cutSelection()
+            "paste" -> editorHost?.paste()
+            "selectAll" -> editorHost?.selectAll()
+            "undo" -> editorHost?.undo()
+            "redo" -> editorHost?.redo()
             "palette" -> editorHost?.openPalette()
             "outline" -> editorHost?.openOutline()
             "settings" -> editorHost?.openSettings()
@@ -801,6 +811,10 @@ class MainActivity : ComponentActivity() {
             "cloudBackup" -> showCloudDialog()
             "selfCheckFind" -> editorView?.evaluateJavascript("window.NativeEditor.selfCheckFind()") { r ->
                 android.util.Log.d("Gscratchpad", "selfCheckFind result=$r")
+            }
+            "selfCheckEdit" -> {
+                android.util.Log.d("Gscratchpad", "selfCheckEdit start")
+                editorHost?.selfCheckEdit()
             }
             "selfCheckGolden" -> runGoldenCorpus()
             "cloudSelfCheck" -> lifecycleScope.launch { cloudSelfCheck() }

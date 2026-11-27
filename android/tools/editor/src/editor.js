@@ -1,11 +1,14 @@
 // 编辑器内核（路线 D）：CodeMirror 6 装配 + 与 Android 的桥接。
 // 打包：npm run build（esbuild 单文件输出到 app/src/main/assets/editor/editor.js）
-import { EditorState, Compartment, EditorSelection } from "@codemirror/state";
+import { EditorState, Compartment, EditorSelection, Transaction } from "@codemirror/state";
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection,
   rectangularSelection, highlightSpecialChars, placeholder, Decoration, ViewPlugin,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab, undo } from "@codemirror/commands";
+import {
+  defaultKeymap, history, historyKeymap, indentWithTab,
+  undo, redo, undoDepth, redoDepth, selectAll,
+} from "@codemirror/commands";
 import { codeFolding, foldKeymap, foldAll, unfoldAll, foldEffect, foldedRanges, foldService } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches, SearchCursor } from "@codemirror/search";
 import { RangeSetBuilder, Prec } from "@codemirror/state";
@@ -30,6 +33,98 @@ function prefsExtension(prefs) {
 }
 
 const bridge = () => (window.AndroidEditor ? window.AndroidEditor : null);
+
+// 选区上下文浮栏：CM 内部选区是唯一真源，DOM 手柄拖动经 updateListener 回传到这里。
+const selbar = document.getElementById("selbar");
+let view = null;
+let selectionEmitTimer = 0;
+
+function selectionInfo() {
+  if (!view) return { from: 0, to: 0, empty: true, text: "", line: 1, column: 1 };
+  const sel = view.state.selection.main;
+  const from = Math.min(sel.from, sel.to);
+  const to = Math.max(sel.from, sel.to);
+  const line = view.state.doc.lineAt(sel.head);
+  return {
+    from, to, empty: from === to, text: view.state.sliceDoc(from, to),
+    line: line.number, column: sel.head - line.from + 1,
+  };
+}
+
+function overlaysVisible() {
+  return ["palette", "outline", "docs", "settings", "help"].some((id) => {
+    const el = document.getElementById(id);
+    return el && !el.hidden;
+  });
+}
+
+function hideSelBar() {
+  if (selbar) selbar.hidden = true;
+}
+
+function positionSelBar(info) {
+  if (!selbar || info.empty || overlaysVisible() || !view) { hideSelBar(); return; }
+  const headRect = view.coordsAtPos(info.from, 1);
+  const tailRect = view.coordsAtPos(info.to, -1);
+  if (!headRect || !tailRect) { hideSelBar(); return; }
+  selbar.hidden = false;
+  selbar.style.visibility = "hidden";
+  const w = selbar.offsetWidth || 320;
+  const h = selbar.offsetHeight || 44;
+  const centerX = (headRect.left + tailRect.right) / 2;
+  const x = Math.max(8, Math.min(centerX - w / 2, window.innerWidth - w - 8));
+  const above = headRect.top - h - 10;
+  const y = above >= 56 ? above : Math.min(tailRect.bottom + 10, window.innerHeight - h - 8);
+  selbar.style.left = `${Math.round(x)}px`;
+  selbar.style.top = `${Math.round(y)}px`;
+  selbar.style.visibility = "";
+}
+
+function emitSelection() {
+  const info = selectionInfo();
+  bridge()?.onSelection?.(JSON.stringify(info));
+  positionSelBar(info);
+  updateHandles();
+  syncToolbar();
+}
+
+// R53：原生长按手柄由 WebView 驱动 DOM 选区，CM 的 selectionSet 不一定触发。
+// 直接监听 document.selectionchange 作为兜底，把 DOM 选区换算成 CM 位置后再定位浮栏。
+let domSelectionTimer = 0;
+function onDomSelectionChange() {
+  if (!view || overlaysVisible()) { hideSelBar(); return; }
+  if (domSelectionTimer) clearTimeout(domSelectionTimer);
+  domSelectionTimer = setTimeout(() => {
+    domSelectionTimer = 0;
+    const domSel = window.getSelection();
+    if (!domSel || domSel.rangeCount === 0 || domSel.isCollapsed) {
+      // DOM 选区清空时，若 CM state 仍非空（例如手柄刚抬起前的瞬间），沿用 CM 选区
+      const info = selectionInfo();
+      if (info.empty) { hideSelBar(); return; }
+      positionSelBar(info);
+      return;
+    }
+    const range = domSel.getRangeAt(0);
+    // 只处理落在 cm-content 内的选区，忽略页面其它输入框
+    if (!view.contentDOM.contains(range.startContainer) || !view.contentDOM.contains(range.endContainer)) return;
+    try {
+      const from = view.posAtDOM(range.startContainer, range.startOffset);
+      const to = view.posAtDOM(range.endContainer, range.endOffset);
+      if (from == null || to == null || from === to) { hideSelBar(); return; }
+      positionSelBar({ from, to, empty: false });
+    } catch (_) {
+      // 选区落在非文档节点（如 widget）时 posAtDOM 可能抛错，忽略即可
+    }
+  }, 16);
+}
+
+function scheduleSelectionEmit() {
+  if (selectionEmitTimer) return;
+  selectionEmitTimer = setTimeout(() => {
+    selectionEmitTimer = 0;
+    emitSelection();
+  }, 16);
+}
 
 // 轻量高亮：只按行首正则给标题、围栏、列表着色，避免引入 @codemirror/lang-markdown
 // （该包会连带 lang-html / lang-css / lezer-javascript / autocomplete，实测约 140 KB）。
@@ -105,7 +200,7 @@ function metrics(kind, value) {
   if (b && b.onMetric) b.onMetric(kind, String(value));
 }
 
-const view = new EditorView({
+view = new EditorView({
   parent: document.getElementById("host"),
   state: EditorState.create({
     doc: "",
@@ -123,13 +218,16 @@ const view = new EditorView({
       prefsCompartment.of(prefsExtension({ wrap: true })),
       EditorView.contentAttributes.of({ "data-gramm": "false", autocorrect: "off", autocapitalize: "off", spellcheck: "false" }),
       EditorView.updateListener.of((update) => {
-        if (!update.docChanged) return;
-        const b = bridge();
-        if (!b) return;
-        clearTimeout(window.__emit);
-        window.__emit = setTimeout(() => {
-          if (b.onChange) b.onChange(view.state.doc.toString());
-        }, 120);
+        if (update.docChanged) {
+          const b = bridge();
+          if (b) {
+            clearTimeout(window.__emit);
+            window.__emit = setTimeout(() => {
+              if (b.onChange) b.onChange(view.state.doc.toString());
+            }, 120);
+          }
+        }
+        if (update.selectionSet || update.docChanged) scheduleSelectionEmit();
       }),
       keymap.of([
         { key: "Mod-n", run: () => { bridge()?.onShortcut?.("NEW"); return true; } },
@@ -176,6 +274,8 @@ window.NativeEditor = {
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: text || "" },
       selection: EditorSelection.cursor(0),
+      // 文档装载不是用户编辑，不能进入撤销历史；否则切文档后一次 undo 会灌回上一篇正文。
+      annotations: Transaction.addToHistory.of(false),
     });
     // 双 rAF：第一帧完成布局与首屏绘制后才回报，避免只测量 dispatch 时间
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -218,6 +318,46 @@ window.NativeEditor = {
     const line = view.state.doc.lineAt(sel.head);
     return JSON.stringify({ line: line.number, column: sel.head - line.from + 1 });
   },
+
+  /** 选区真源：CM 位置区间（from/to）、是否空选区、选中文本。 */
+  selection() { return JSON.stringify(selectionInfo()); },
+
+  setSelection(from, to) {
+    const max = view.state.doc.length;
+    const a = Math.max(0, Math.min(Number(from) || 0, max));
+    const b = Math.max(0, Math.min(Number(to) || a, max));
+    view.dispatch({ selection: { anchor: a, head: b }, scrollIntoView: true });
+    view.focus();
+    return JSON.stringify(selectionInfo());
+  },
+
+  undo() { undo(view); view.focus(); return JSON.stringify(selectionInfo()); },
+  redo() { redo(view); view.focus(); return JSON.stringify(selectionInfo()); },
+  undoDepth() { return undoDepth(view.state); },
+  redoDepth() { return redoDepth(view.state); },
+  selectAll() { selectAll(view); view.focus(); return JSON.stringify(selectionInfo()); },
+
+  copySelection() {
+    const text = selectionInfo().text;
+    if (text) bridge()?.copy?.(text);
+    view.focus();
+    return text.length;
+  },
+
+  cutSelection() {
+    const info = selectionInfo();
+    if (info.empty) return 0;
+    bridge()?.copy?.(info.text);
+    view.dispatch({
+      changes: { from: info.from, to: info.to, insert: "" },
+      selection: { anchor: info.from },
+    });
+    view.focus();
+    return info.text.length;
+  },
+
+  /** 粘贴必须走宿主剪贴板：JS 侧无可靠读取权限。 */
+  pasteSelection() { bridge()?.onAction?.("paste"); return "async"; },
 
   scrollToLine(n) {
     const line = view.state.doc.line(Math.min(Math.max(1, n), view.state.doc.lines));
@@ -363,6 +503,336 @@ document.addEventListener("click", (ev) => {
   moreMenu.hidden = true;
 }, true);
 
+// 选区操作条（R54 改为四按钮：复制/剪切/粘贴/全选；撤销重做移入编辑栏）。
+if (selbar) {
+  selbar.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const btn = ev.target.closest("button[data-sel]");
+    if (!btn) return;
+    const act = btn.dataset.sel;
+    if (act === "copy") window.NativeEditor.copySelection();
+    else if (act === "cut") window.NativeEditor.cutSelection();
+    else if (act === "paste") window.NativeEditor.pasteSelection();
+    else if (act === "selectAll") window.NativeEditor.selectAll();
+    scheduleSelectionEmit();
+  });
+}
+if (scroller) scroller.addEventListener("scroll", () => scheduleSelectionEmit(), { passive: true });
+window.addEventListener("resize", () => scheduleSelectionEmit(), { passive: true });
+// R53：原生手柄拖选的兜底路径——CM 的 updateListener 未必触发时，靠 DOM 选区驱动浮栏。
+document.addEventListener("selectionchange", onDomSelectionChange, { passive: true });
+
+// ---------------------------------------------------------------- 编辑栏（R54：Obsidian 移动端同款）
+const toolbar = document.getElementById("toolbar");
+const handleA = document.getElementById("handle-a");
+const handleB = document.getElementById("handle-b");
+
+/** 编辑栏可见性 + 撤销/重做置灰：无覆盖层、查找条收起时显示；深度为 0 时禁用。 */
+function syncToolbar() {
+  if (!toolbar || !view) return;
+  const show = !overlaysVisible() && findbar.hidden;
+  toolbar.hidden = !show;
+  if (!show) return;
+  const u = toolbar.querySelector('[data-tb="undo"]');
+  const r = toolbar.querySelector('[data-tb="redo"]');
+  if (u) u.disabled = undoDepth(view.state) === 0;
+  if (r) r.disabled = redoDepth(view.state) === 0;
+}
+
+/** 包裹/取消包裹（对称）：选区内已含语法对 → 取消；选区两侧紧邻语法对 → 剔除；否则包裹。 */
+function toggleWrap(mark) {
+  const sel = view.state.selection.main;
+  const text = view.state.sliceDoc(sel.from, sel.to);
+  const m = mark.length;
+  if (text.length >= m * 2 && text.startsWith(mark) && text.endsWith(mark)) {
+    const inner = text.slice(m, text.length - m);
+    view.dispatch({
+      changes: { from: sel.from, to: sel.to, insert: inner },
+      selection: { anchor: sel.from, head: sel.from + inner.length },
+      scrollIntoView: true,
+    });
+    return;
+  }
+  const before = view.state.sliceDoc(Math.max(0, sel.from - m), sel.from);
+  const after = view.state.sliceDoc(sel.to, Math.min(view.state.doc.length, sel.to + m));
+  if (before === mark && after === mark) {
+    view.dispatch({
+      changes: [
+        { from: sel.from - m, to: sel.from, insert: "" },
+        { from: sel.to, to: sel.to + m, insert: "" },
+      ],
+      selection: { anchor: sel.from - m, head: sel.to - m },
+      scrollIntoView: true,
+    });
+    return;
+  }
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert: mark + text + mark },
+    selection: { anchor: sel.from + m, head: sel.from + m + text.length },
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
+/** 标题循环：无标题 → 设级；已是该级 → 取消；其它级 → 改为该级。 */
+function toggleHeading(level) {
+  const sel = view.state.selection.main;
+  const line = view.state.doc.lineAt(sel.head);
+  const m = /^(#{1,6})(\s+|$)/.exec(line.text);
+  let changes;
+  let anchor;
+  if (m && m[1].length === level) {
+    changes = { from: line.from, to: line.from + m[0].length, insert: "" };
+    anchor = line.from;
+  } else if (m) {
+    changes = { from: line.from, to: line.from + m[0].length, insert: "#".repeat(level) + " " };
+    anchor = line.from;
+  } else {
+    const prefix = "#".repeat(level) + " ";
+    changes = { from: line.from, to: line.from, insert: prefix };
+    anchor = line.from + prefix.length;
+  }
+  view.dispatch({ changes, selection: { anchor }, scrollIntoView: true });
+  view.focus();
+}
+
+/** 行级前缀切换（引用/无序/有序）：选区涉及行已全部带前缀 → 整体取消；否则逐行补前缀。 */
+function toggleLines(matcher, prefixOf) {
+  const sel = view.state.selection.main;
+  const first = view.state.doc.lineAt(sel.from).number;
+  const last = view.state.doc.lineAt(sel.to).number;
+  const lines = [];
+  for (let n = first; n <= last; n += 1) lines.push(view.state.doc.line(n));
+  const matches = lines.map((l) => matcher(l.text));
+  const allMatched = matches.every((m) => m);
+  const changes = [];
+  let num = 1;
+  lines.forEach((line, i) => {
+    if (allMatched) {
+      changes.push({ from: line.from, to: line.from + matches[i][0].length, insert: "" });
+    } else if (!matches[i]) {
+      const prefix = prefixOf(num);
+      if (prefix != null) {
+        changes.push({ from: line.from, to: line.from, insert: prefix });
+        num += 1;
+      }
+    }
+  });
+  if (!changes.length) return;
+  view.dispatch({ changes, selection: { anchor: sel.from }, scrollIntoView: true });
+  view.focus();
+}
+
+/** 待办三态：已是待办 → 去 [ ]；是无序列表 → 插入 [ ]；普通行 → 插入 - [ ]。 */
+function toggleTask() {
+  const sel = view.state.selection.main;
+  const first = view.state.doc.lineAt(sel.from).number;
+  const last = view.state.doc.lineAt(sel.to).number;
+  const changes = [];
+  for (let n = first; n <= last; n += 1) {
+    const line = view.state.doc.line(n);
+    const t = /^(\s*[-*]\s)\[([ xX])\]( ?)/.exec(line.text);
+    const u = /^(\s*[-*]\s)/.exec(line.text);
+    if (t) {
+      changes.push({ from: line.from + t[1].length, to: line.from + t[1].length + 4, insert: "" });
+    } else if (u) {
+      changes.push({ from: line.from + u[0].length, to: line.from + u[0].length, insert: "[ ] " });
+    } else {
+      changes.push({ from: line.from, to: line.from, insert: "- [ ] " });
+    }
+  }
+  view.dispatch({ changes, selection: { anchor: sel.from }, scrollIntoView: true });
+  view.focus();
+}
+
+/** 链接：选中文字进 []，光标落在 () 内；无选区则光标落 [] 内。 */
+function insertLink() {
+  const sel = view.state.selection.main;
+  const text = view.state.sliceDoc(sel.from, sel.to);
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert: `[${text}]()` },
+    selection: { anchor: sel.from + (text ? text.length + 3 : 1) },
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
+/** 代码块：多行选区整体包裹；否则插入空围栏，光标居中。 */
+function insertCodeBlock() {
+  const sel = view.state.selection.main;
+  const text = view.state.sliceDoc(sel.from, sel.to);
+  if (text && text.includes("\n")) {
+    view.dispatch({
+      changes: { from: sel.from, to: sel.to, insert: "```\n" + text + "\n```" },
+      selection: { anchor: sel.from + 3 },
+      scrollIntoView: true,
+    });
+  } else {
+    view.dispatch({
+      changes: { from: sel.from, to: sel.to, insert: "```\n\n```" },
+      selection: { anchor: sel.from + 4 },
+      scrollIntoView: true,
+    });
+  }
+  view.focus();
+}
+
+function toolbarAct(id) {
+  if (!view) return;
+  switch (id) {
+    case "undo": window.NativeEditor.undo(); break;
+    case "redo": window.NativeEditor.redo(); break;
+    case "h1": toggleHeading(1); break;
+    case "h2": toggleHeading(2); break;
+    case "h3": toggleHeading(3); break;
+    case "bold": toggleWrap("**"); break;
+    case "italic": toggleWrap("*"); break;
+    case "strike": toggleWrap("~~"); break;
+    case "hl": toggleWrap("=="); break;
+    case "icode": toggleWrap("`"); break;
+    case "quote": toggleLines((t) => /^(\s*> ?)/.exec(t), () => "> "); break;
+    case "ul": toggleLines((t) => /^(\s*[-*]\s)/.exec(t), () => "- "); break;
+    case "ol": toggleLines((t) => /^(\s*\d+\.\s)/.exec(t), (n) => `${n}. `); break;
+    case "task": toggleTask(); break;
+    case "link": insertLink(); break;
+    case "cblock": insertCodeBlock(); break;
+    default: break;
+  }
+  syncToolbar(); // 立即刷新撤销/重做置灰态，不等 16ms 防抖
+  scheduleSelectionEmit();
+}
+
+if (toolbar) {
+  toolbar.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const btn = ev.target.closest("button[data-tb]");
+    if (!btn || btn.disabled) return;
+    toolbarAct(btn.dataset.tb);
+  });
+}
+window.NativeEditor.toolbarAct = toolbarAct;
+
+// ---------------------------------------------- 长按选词与自绘手柄（R54，2A 完全接管）
+// 系统文本选择已被 user-select:none 禁用（editor.css），此处是唯一选择路径：
+// 长按 500ms 选词；双击选词；拖手柄字符级微调；选区变化驱动操作条与手柄定位。
+let lpTimer = 0;
+let lpStart = null;
+let dragHandle = null;
+let lastTap = 0;
+let lastTapX = 0;
+let lastTapY = 0;
+
+function selectWordAt(x, y) {
+  const pos = view.posAtCoords({ x, y });
+  if (pos == null) return false;
+  const w = view.state.wordAt(pos);
+  if (w && w.from !== w.to) view.dispatch({ selection: { anchor: w.from, head: w.to }, scrollIntoView: true });
+  else view.dispatch({ selection: { anchor: pos, head: Math.min(pos + 1, view.state.doc.length) }, scrollIntoView: true });
+  return true;
+}
+
+function hideHandles() {
+  if (handleA) handleA.style.display = "none";
+  if (handleB) handleB.style.display = "none";
+}
+
+function updateHandles() {
+  if (!handleA || !handleB || !view) return;
+  const info = selectionInfo();
+  if (info.empty || overlaysVisible()) { hideHandles(); return; }
+  const a = view.coordsAtPos(info.from, 1);
+  const b = view.coordsAtPos(info.to, -1);
+  if (!a || !b) { hideHandles(); return; }
+  handleA.style.display = "block";
+  handleA.style.left = `${Math.max(0, Math.round(a.left - 24))}px`;
+  handleA.style.top = `${Math.round(a.bottom)}px`;
+  handleB.style.display = "block";
+  handleB.style.left = `${Math.min(window.innerWidth - 24, Math.round(b.right))}px`;
+  handleB.style.top = `${Math.round(b.bottom)}px`;
+}
+
+function onEditorTouchStart(ev) {
+  if (overlaysVisible()) return;
+  const t = ev.touches[0];
+  if (!t) return;
+  lpStart = { x: t.clientX, y: t.clientY };
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => {
+    lpTimer = 0;
+    if (!lpStart) return;
+    if (selectWordAt(lpStart.x, lpStart.y)) scheduleSelectionEmit();
+    lpStart = null;
+  }, 500);
+}
+
+function onEditorTouchMove(ev) {
+  if (!dragHandle) {
+    if (lpTimer && lpStart) {
+      const t = ev.touches[0];
+      if (t && (Math.abs(t.clientX - lpStart.x) > 10 || Math.abs(t.clientY - lpStart.y) > 10)) {
+        clearTimeout(lpTimer);
+        lpTimer = 0;
+        lpStart = null;
+      }
+    }
+    return;
+  }
+  ev.preventDefault(); // 拖手柄期间锁定滚动
+  const t = ev.touches[0];
+  if (!t) return;
+  const pos = view.posAtCoords({ x: t.clientX, y: t.clientY }, true);
+  if (pos == null) return;
+  const sel = view.state.selection.main;
+  if (dragHandle === "a") view.dispatch({ selection: { anchor: pos, head: sel.head }, scrollIntoView: true });
+  else view.dispatch({ selection: { anchor: sel.anchor, head: pos }, scrollIntoView: true });
+}
+
+function onEditorTouchEnd(ev) {
+  clearTimeout(lpTimer);
+  lpTimer = 0;
+  lpStart = null;
+  dragHandle = null;
+  // 双击选词（自实现，不依赖原生 dblclick）
+  const t = ev.changedTouches[0];
+  if (t) {
+    const now = performance.now();
+    if (now - lastTap < 300 && Math.abs(t.clientX - lastTapX) < 30 && Math.abs(t.clientY - lastTapY) < 30) {
+      lastTap = 0;
+      setTimeout(() => {
+        if (selectWordAt(t.clientX, t.clientY)) scheduleSelectionEmit();
+      }, 0);
+    } else {
+      lastTap = now;
+      lastTapX = t.clientX;
+      lastTapY = t.clientY;
+    }
+  }
+}
+
+if (view.contentDOM) {
+  view.contentDOM.addEventListener("touchstart", onEditorTouchStart, { passive: true });
+  view.contentDOM.addEventListener("touchmove", onEditorTouchMove, { passive: false });
+  view.contentDOM.addEventListener("touchend", onEditorTouchEnd, { passive: true });
+  // 部分 ROM 的长按会触发 contextmenu（系统菜单入口），直接禁掉
+  view.contentDOM.addEventListener("contextmenu", (ev) => ev.preventDefault());
+}
+[["handle-a", "a"], ["handle-b", "b"]].forEach(([id, kind]) => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("touchstart", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    dragHandle = kind;
+  }, { passive: false });
+  el.addEventListener("touchend", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    dragHandle = null;
+  }, { passive: false });
+});
+
 function findNext(backwards) {
   const q = document.getElementById("findq").value;
   if (!q) return;
@@ -468,6 +938,8 @@ function hideOverlays() {
   outlineEl.hidden = true;
   docsEl.hidden = true;
   settingsEl.hidden = true;
+  hideSelBar();
+  if (typeof hideHandles === "function") hideHandles();
   const helpEl = document.getElementById("help");
   if (helpEl) helpEl.hidden = true;
   if (typeof closeMore === "function") closeMore();
@@ -621,7 +1093,7 @@ document.addEventListener("click", (ev) => {
   const t = ev.target;
   if (!t || typeof t.closest !== "function") return;
   if (t.closest(".sheet") || t.closest("#moremenu") || t.closest("#findbar")) return;
-  if (t.closest("#bar") || t.closest("#crumb")) return;
+  if (t.closest("#bar") || t.closest("#crumb") || t.closest("#selbar")) return;
   hideOverlays();
   if (!findbar.hidden) findbar.hidden = true;
 });
@@ -678,6 +1150,7 @@ window.NativeEditor.selfCheckFind = () => {
     changes: { from: 0, to: view.state.doc.length, insert: base },
     selection: { anchor: 0 },
     userEvent: "probe.setup",
+    annotations: Transaction.addToHistory.of(false),
   });
   setTimeout(() => {
     document.getElementById("findq").value = "alpha";
@@ -704,6 +1177,7 @@ window.NativeEditor.selfCheckFind = () => {
           changes: { from: 0, to: view.state.doc.length, insert: saved },
           selection: { anchor: 0 },
           userEvent: "probe.restore",
+          annotations: Transaction.addToHistory.of(false),
         });
         metrics("selfCheck", JSON.stringify(out));
         bridge()?.onMetric?.("selfCheck", JSON.stringify(out));
@@ -712,6 +1186,121 @@ window.NativeEditor.selfCheckFind = () => {
   }, GAP);
   return "async";
 };
+/**
+ * R54 自检：编辑栏逐动作（包裹/取消对称、标题循环、列表/待办）、长按选词、手柄拖动、
+ * 选区操作条四按钮。宿主用 `--es runAction selfCheckEdit` 触发，结果走 metric 上报。
+ */
+window.NativeEditor.selfCheckEdit = () => {
+  const out = {};
+  const saved = view.state.doc.toString();
+  const GAP = 620;
+  window.NativeEditor.setDoc("alpha beta gamma");
+  out.historyClean = undoDepth(view.state) === 0;
+  setTimeout(() => {
+    const tb = document.getElementById("toolbar");
+    out.toolbarVisible = !!tb && !tb.hidden;
+    const undoBtn = tb && tb.querySelector('[data-tb="undo"]');
+    const redoBtn = tb && tb.querySelector('[data-tb="redo"]');
+    out.undoBtnDisabled = !!undoBtn && undoBtn.disabled === true;
+    window.NativeEditor.toolbarAct("bold");
+    out.boldInsert = view.state.doc.toString() === "****alpha beta gamma";
+    // 刚编辑后 redo 栈为空（redo 在 undo 之后才有意义），断言撤销按钮点亮
+    out.undoBtnEnabledAfterEdit = !!undoBtn && undoBtn.disabled === false;
+    window.NativeEditor.toolbarAct("undo");
+    out.toolbarUndo = view.state.doc.toString() === "alpha beta gamma";
+    setTimeout(() => {
+      window.NativeEditor.setSelection(0, 5);
+      window.NativeEditor.toolbarAct("bold");
+      out.boldWrap = view.state.doc.toString() === "**alpha** beta gamma";
+      window.NativeEditor.toolbarAct("bold");
+      out.boldUnwrap = view.state.doc.toString() === "alpha beta gamma";
+      setTimeout(() => {
+        window.NativeEditor.setSelection(0, 0);
+        window.NativeEditor.toolbarAct("h1");
+        out.h1 = view.state.doc.toString() === "# alpha beta gamma";
+        window.NativeEditor.toolbarAct("h2");
+        out.h2 = view.state.doc.toString() === "## alpha beta gamma";
+        window.NativeEditor.toolbarAct("h1");
+        out.h1Again = view.state.doc.toString() === "# alpha beta gamma";
+        window.NativeEditor.toolbarAct("h1");
+        out.h1Cancel = view.state.doc.toString() === "alpha beta gamma";
+        setTimeout(() => {
+          window.NativeEditor.toolbarAct("ul");
+          out.ul = view.state.doc.toString() === "- alpha beta gamma";
+          window.NativeEditor.toolbarAct("task");
+          out.taskOnUl = view.state.doc.toString() === "- [ ] alpha beta gamma";
+          window.NativeEditor.toolbarAct("task");
+          out.taskOff = view.state.doc.toString() === "- alpha beta gamma";
+          window.NativeEditor.toolbarAct("ul");
+          out.ulCancel = view.state.doc.toString() === "alpha beta gamma";
+          setTimeout(() => {
+            // 长按选词：合成 touchstart 后保持按下（不发 touchend，否则会取消长按定时器），
+            // 等待 500ms 定时器触发选词后再断言，与真实手指长按一致。
+            try {
+              const lineDom = view.contentDOM.querySelector(".cm-line");
+              const rect = lineDom.getBoundingClientRect();
+              const touch = new Touch({
+                identifier: 1, target: view.contentDOM,
+                clientX: rect.left + 20, clientY: rect.top + rect.height / 2,
+              });
+              view.contentDOM.dispatchEvent(new TouchEvent("touchstart", {
+                touches: [touch], targetTouches: [touch], changedTouches: [touch],
+                bubbles: true, cancelable: true,
+              }));
+              setTimeout(() => {
+                view.contentDOM.dispatchEvent(new TouchEvent("touchend", {
+                  touches: [], targetTouches: [],
+                  changedTouches: [new Touch({
+                    identifier: 1, target: view.contentDOM,
+                    clientX: rect.left + 20, clientY: rect.top + rect.height / 2,
+                  })],
+                  bubbles: true, cancelable: true,
+                }));
+              }, GAP - 60);
+            } catch (_) { out.touchSynth = false; }
+            setTimeout(() => {
+              out.longPressWord = JSON.parse(window.NativeEditor.selection()).text === "alpha";
+              out.selbarFourButtons = !!selbar && !selbar.hidden && selbar.querySelectorAll("button").length === 4;
+              setTimeout(() => {
+                // 手柄拖动：handle-b touchstart → contentDOM touchmove → touchend
+                try {
+                  const lineDom = view.contentDOM.querySelector(".cm-line");
+                  const rect = lineDom.getBoundingClientRect();
+                  const hb = document.getElementById("handle-b");
+                  const down = new Touch({ identifier: 2, target: hb, clientX: rect.left + 42, clientY: rect.top + rect.height / 2 });
+                  hb.dispatchEvent(new TouchEvent("touchstart", {
+                    touches: [down], targetTouches: [down], changedTouches: [down],
+                    bubbles: true, cancelable: true,
+                  }));
+                  window.NativeEditor.setSelection(0, 5); // 复位为 alpha 选区再拖
+                  const move = new Touch({ identifier: 2, target: view.contentDOM, clientX: rect.left + 60, clientY: rect.top + rect.height / 2 });
+                  view.contentDOM.dispatchEvent(new TouchEvent("touchmove", {
+                    touches: [move], targetTouches: [move], changedTouches: [move],
+                    bubbles: true, cancelable: true,
+                  }));
+                  const up = new Touch({ identifier: 2, target: hb, clientX: rect.left + 60, clientY: rect.top + rect.height / 2 });
+                  hb.dispatchEvent(new TouchEvent("touchend", {
+                    touches: [], targetTouches: [], changedTouches: [up],
+                    bubbles: true, cancelable: true,
+                  }));
+                } catch (_) { out.handleSynth = false; }
+                setTimeout(() => {
+                  const sel = JSON.parse(window.NativeEditor.selection());
+                  out.handleDrag = sel.text.startsWith("alpha") && sel.text.length > 5;
+                  out.handlesVisible = !!handleA && handleA.style.display === "block" && !!handleB && handleB.style.display === "block";
+                  window.NativeEditor.setDoc(saved);
+                  bridge()?.onMetric?.("selfCheckEdit", JSON.stringify(out));
+                }, 60);
+              }, GAP); // 长按 500ms + 余量
+            }, GAP);
+          }, GAP);
+        }, GAP);
+      }, GAP);
+    }, GAP);
+  }, 50);
+  return "async";
+};
+
 window.NativeEditor.paletteItems = () => JSON.stringify(filterActions(paletteQuery.value).map((a) => a.id));
 window.NativeEditor.setPrefsFromHost = (json) => {
   try { prefsState = { ...prefsState, ...JSON.parse(json || "{}") }; } catch (e) { /* 保留默认 */ }

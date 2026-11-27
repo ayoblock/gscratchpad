@@ -2,7 +2,7 @@
 
 本文只写已在本机（Linux，JDK 21）实际执行过的取值与数据；早期 Windows 环境安装记录见 [archive/ANDROID_ENV_SETUP.md](archive/ANDROID_ENV_SETUP.md)。命令均在 `android/` 下执行，本地命令形态见 §1「命令执行纪律」。
 
-> 当前版本 **0.8.3（versionCode 46）**，最近一轮 R45（2026-11-21）：切换文档浮层口径修正（当前文档同目录优先、绑定工作目录回退，`WorkDirSwitchList.dirForList` 纯函数）+ 外部写回失败原因细化（`FileGateway.saveAtomicDetailed` 五环节上报，替代笼统「路径不可写」）+ 恢复误删的 StorageAccessTest（6 条）。205 单测 / 30 套件 / 0 失败，domain 95.7%（355/371），门禁全绿、upload key 出包。上一轮 R44：Android 10 legacy 存储标志 + 主页按钮归位改名。逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。
+> 当前版本 **0.9.8（versionCode 55）**，最近一轮 R55（2026-11-27）：编辑栏浮栏化 + 毛玻璃特效（backdrop-filter blur16 悬浮圆角，selbar 同步，旧内核 @supports 退化）；237 单测 / 0 失败，`coverageGate` / `lintRelease` 0 error / `verifyReleaseBudget` 全绿，upload key 出包至 `android/dist/`。逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) 为唯一权威记录，本文不重复维护流水账。
 
 ## 1. 工具链（实测）
 

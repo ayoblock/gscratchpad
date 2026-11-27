@@ -127,6 +127,140 @@ body.dark #findbar button { background: rgba(255, 255, 255, 0.08); }
   color: inherit;
 }
 
+/* R54 编辑栏：Obsidian 移动端同款 Markdown 编辑工具栏，固定底部、横向滚动。
+   撤销/重做最左且按历史深度置灰；查找条或覆盖层打开时整条隐藏。 */
+/* R55 浮栏化：脱离边缘悬浮 + 毛玻璃（backdrop-filter），正文从其后方滚过透出磨砂效果。 */
+#toolbar {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(8px + env(safe-area-inset-bottom));
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  background: rgba(246, 247, 249, 0.72);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  color: #1f2328;
+}
+#toolbar[hidden] { display: none; }
+body.dark #toolbar {
+  background: rgba(34, 39, 46, 0.62);
+  color: #e6edf3;
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+/* 不支持 backdrop-filter 的旧内核退化为更实的半透明底，保证可读。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  #toolbar { background: rgba(246, 247, 249, 0.96); }
+  body.dark #toolbar { background: rgba(34, 39, 46, 0.96); }
+}
+#toolbar button {
+  flex: 0 0 auto;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1;
+}
+#toolbar button:active { background: rgba(128, 128, 128, 0.22); }
+body.dark #toolbar button:active { background: rgba(255, 255, 255, 0.14); }
+#toolbar button:disabled { opacity: 0.35; }
+#toolbar button b, #toolbar button i, #toolbar button s { font-size: 15px; }
+#toolbar .sep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 24px;
+  margin: 0 4px;
+  background: rgba(128, 128, 128, 0.35);
+}
+
+/* R54 自绘选区手柄（2A 完全接管）：竖条+圆点，拖动做字符级微调。 */
+.sel-handle {
+  position: fixed;
+  z-index: 26;
+  width: 24px;
+  height: 28px;
+  display: none;
+  touch-action: none;
+}
+.sel-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 2.5px;
+  height: 17px;
+  background: #0969da;
+  border-radius: 2px;
+}
+.sel-handle::after {
+  content: "";
+  position: absolute;
+  bottom: 1px;
+  width: 13px;
+  height: 13px;
+  background: #0969da;
+  border-radius: 50%;
+}
+#handle-a::before { right: 10px; }
+#handle-a::after { right: 4.5px; }
+#handle-b::before { left: 10px; }
+#handle-b::after { left: 4.5px; }
+body.dark .sel-handle::before, body.dark .sel-handle::after { background: #58a6ff; }
+
+
+#selbar {
+  position: fixed;
+  z-index: 25;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.75);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  color: #1f2328;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  white-space: nowrap;
+}
+#selbar[hidden] { display: none; }
+body.dark #selbar {
+  background: rgba(38, 43, 49, 0.72);
+  color: #e6edf3;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  #selbar { background: rgba(255, 255, 255, 0.97); }
+  body.dark #selbar { background: rgba(38, 43, 49, 0.97); }
+}
+#selbar button {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+}
+#selbar button:active { background: rgba(128, 128, 128, 0.20); }
+body.dark #selbar button:active { background: rgba(255, 255, 255, 0.12); }
+
 #host {
   flex: 1 1 auto;
   min-height: 0;
@@ -141,7 +275,10 @@ body.dark #findbar button { background: rgba(255, 255, 255, 0.08); }
   overflow: auto;
   -webkit-overflow-scrolling: touch;
 }
-.cm-editor .cm-content { padding: 0 12px 0 4px; caret-color: #0969da; touch-action: pan-y; }
+.cm-editor .cm-content { padding: 0 12px 0 4px; caret-color: #0969da; touch-action: pan-y;
+  /* R54：禁用系统文本选择，长按/拖选全部由页内自绘手柄接管（系统 ActionMode 在部分 ROM 上
+     会在数百毫秒内清空选区，导致选区操作条无法显示）；CM 的选区高亮为自绘装饰，不受影响。 */
+  -webkit-user-select: none; user-select: none; }
 body.dark .cm-editor .cm-content { caret-color: #58a6ff; }
 .cm-editor .cm-gutters {
   border-right: 1px solid rgba(128, 128, 128, 0.25);

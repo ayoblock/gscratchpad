@@ -89,6 +89,38 @@
   <button data-find="all">全部</button>
   <button data-find="close">×</button>
 </div>
+<div id="selbar" hidden aria-label="选区操作条">
+  <button data-sel="copy" aria-label="复制" title="复制">复制</button>
+  <button data-sel="cut" aria-label="剪切" title="剪切">剪切</button>
+  <button data-sel="paste" aria-label="粘贴" title="粘贴">粘贴</button>
+  <button data-sel="selectAll" aria-label="全选" title="全选">全选</button>
+</div>
+<div id="handle-a" class="sel-handle" aria-hidden="true"></div>
+<div id="handle-b" class="sel-handle" aria-hidden="true"></div>
+<div id="toolbar" aria-label="编辑栏">
+  <button data-tb="undo" aria-label="撤销" title="撤销">&#8630;</button>
+  <button data-tb="redo" aria-label="重做" title="重做">&#8631;</button>
+  <span class="sep"></span>
+  <button data-tb="h1">H1</button>
+  <button data-tb="h2">H2</button>
+  <button data-tb="h3">H3</button>
+  <button data-tb="bold" aria-label="加粗" title="加粗"><b>B</b></button>
+  <button data-tb="italic" aria-label="斜体" title="斜体"><i>I</i></button>
+  <button data-tb="strike" aria-label="删除线" title="删除线"><s>S</s></button>
+  <button data-tb="hl" aria-label="高亮" title="高亮">==</button>
+  <button data-tb="icode" aria-label="行内代码" title="行内代码">&lt;&gt;</button>
+  <button data-tb="quote" aria-label="引用" title="引用">&gt;</button>
+  <button data-tb="ul" aria-label="无序列表" title="无序列表">&bull;</button>
+  <button data-tb="ol" aria-label="有序列表" title="有序列表">1.</button>
+  <button data-tb="task" aria-label="待办" title="待办">&#9745;</button>
+  <button data-tb="link" aria-label="链接" title="链接">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <path d="M9.5 14.5l5-5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M11 7.5l1.8-1.8a3.2 3.2 0 014.5 4.5L15.5 12M13 16.5l-1.8 1.8a3.2 3.2 0 01-4.5-4.5L8.5 12" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+  </button>
+  <button data-tb="cblock" aria-label="代码块" title="代码块">```</button>
+</div>
 <div id="host"></div>
 <div id="help" class="overlay" hidden>
   <div class="sheet">
@@ -100,6 +132,7 @@
       <div class="item">Ctrl+Shift+S<small>另存为</small></div>
       <div class="item">Ctrl+O<small>打开文件</small></div>
       <div class="item">Ctrl+F / Ctrl+H<small>查找 / 替换</small></div>
+      <div class="item">Ctrl+Z / Ctrl+Y<small>撤销 / 重做（编辑栏最左两键）</small></div>
       <div class="item">Ctrl+Shift+I<small>命令面板</small></div>
       <div class="item">Ctrl+Shift+O<small>文档大纲</small></div>
       <div class="item">Ctrl+Shift+P<small>预览</small></div>

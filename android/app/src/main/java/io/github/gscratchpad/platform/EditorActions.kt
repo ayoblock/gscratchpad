@@ -26,6 +26,12 @@ object EditorActions {
         EditorAction("docs", "切换文档（弹出列表）", "docs switch 切换文档 文档列表 上一篇 下一篇", "文件"),
         EditorAction("find", "查找", "find search 查找 搜索", "编辑"),
         EditorAction("replace", "替换", "replace 替换", "编辑"),
+        EditorAction("copy", "复制选区", "copy 复制 拷贝", "编辑"),
+        EditorAction("cut", "剪切选区", "cut 剪切", "编辑"),
+        EditorAction("paste", "粘贴", "paste 粘贴", "编辑"),
+        EditorAction("selectAll", "全选", "selectall 全选 选择全部", "编辑"),
+        // R54：撤销/重做不再进命令面板（用户拍板）——固定入口是编辑栏最左两键，
+        // 命令面板里搜「撤销」属于触屏用户够不着的地方，故从动作表移除。
         EditorAction("snippets", "插入片段", "snippet template 片段 模板", "编辑"),
         EditorAction("fold", "折叠/展开光标所在块", "fold 折叠 展开", "视图"),
         EditorAction("foldAll", "全部折叠", "foldall 折叠全部", "视图"),

@@ -2,7 +2,7 @@
 
 > 对应方案：移植方案 v1.0 §1–§6（已并入 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §7 存档）。
 > 工程：`android/`（Gradle，单 `:app` 模块，namespace `io.github.gscratchpad`）。
-> 版本：0.8.3（versionCode 46）。日期：2026-11-21。编辑器内核为路线 D（CodeMirror 6 in WebView）；宿主为「Activity 内常驻 WebView + `TYPE_APPLICATION_PANEL` 子窗口」，界面归一为「Compose 文档列表 + WebView 编辑器」两屏；0.7.0 完成 P2 收尾，0.7.14 起编辑器↔预览同页互斥切换，0.7.20–0.7.22 收敛 SAF 打开/另存链路并落地 My folders 页，0.7.23 文档切换改弹出式列表 + 本地文件夹工作目录绑定，0.7.24 长按菜单与 WebDAV 对话框统一为 App 深色卡片风格。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。S1 复评与常驻版实测见 [ANDROID_SPIKE_REPORT.md](ANDROID_SPIKE_REPORT.md) §7。
+> 版本：0.9.8（versionCode 55）。日期：2026-11-27。R46–R55 的逐轮演进见权威看板。编辑器内核为路线 D（CodeMirror 6 in WebView）；宿主为「Activity 内常驻 WebView + `TYPE_APPLICATION_PANEL` 子窗口」，界面归一为「Compose 文档列表 + WebView 编辑器」两屏；0.7.0 完成 P2 收尾，0.7.14 起编辑器↔预览同页互斥切换，0.7.20–0.7.22 收敛 SAF 打开/另存链路并落地 My folders 页，0.7.23 文档切换改弹出式列表 + 本地文件夹工作目录绑定，0.7.24 长按菜单与 WebDAV 对话框统一为 App 深色卡片风格。**逐轮变更史以 [ANDROID_STAGE_STATUS.md](ANDROID_STAGE_STATUS.md) §5.4 为唯一权威记录**，本文不重复维护流水账。S1 复评与常驻版实测见 [ANDROID_SPIKE_REPORT.md](ANDROID_SPIKE_REPORT.md) §7。
 
 ## 1. 交付范围
 

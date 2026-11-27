@@ -2149,3 +2149,82 @@ PROPFIND 大小/时间解析）。真实 WebDAV 双设备复测待用户确认�
 ### 三、版本与产物
 
 - 桌面 1.17.4 → **1.17.5**；Android 0.9.3/50 → **0.9.4/51**；双端 release 产物。
+
+## 修订四十四（Android 0.9.5 / 52）：编辑器选区浮栏、长按选择与撤销重做
+
+### 一、结论
+
+- Android 235 例 / 0 失败（新增 `EditorAssetTest` 3 例锁产物、`EditorActionsTest` 增 6 条动作断言）；桌面本轮无代码改动，仍为 1.17.5 / 243 例。
+- 门禁：`testDebugUnitTest`、`coverageGate`、`lintRelease`（0 error）、`verifyReleaseBudget`（两包各约 3.39 MB）全绿；`stageRelease` 输出到 `android/dist/`，自动清 0.9.4 旧包。
+- 真机 `192.168.159.245:5555`（arm64-v8a）：`selfCheckEdit` 七项全 true（历史干净、选区区间、浮栏可见、插入、深度、撤销、重做）；`selfCheckFind` 回归全 true。
+
+### 二、实现与验证点
+
+- 选区浮栏 `#selbar` 六按钮（复制/剪切/粘贴/全选/撤销/重做），位置由 `view.coordsAtPos()` 计算；按钮事件阻止冒泡以防被全局收起逻辑隐藏。
+- 选区状态 `from/to/empty/text` 经 `AndroidEditor.onSelection` 回传；剪贴板走 `ClipboardManager`，粘贴复用 CM 当前选区。
+- `setDoc()` 标注 `Transaction.addToHistory.of(false)`，自检 `historyClean=true`，切断跨文档撤销链。
+- A/B 对照：adb 合成长按在 ACTION_UP 时即取消选区，去掉 ActionMode 抑制逻辑后同样崩塌，属注入链路限制而非应用回归；原生手柄拖动与浮栏共存需用户真机目视确认。
+- 矩形/列选保持 5A 决议：内核既有 `rectangularSelection()` 不动，新浮栏不加入口。
+
+### 三、产物
+
+- Android 0.9.4/51 → **0.9.5/52**；`android/dist/scratchpad-{arm64-v8a,x86_64}-release-0.9.5.apk`，upload key 签名指纹 `16e2b145…f0aa`。
+- 桌面版本不变（1.17.5）。
+
+
+## 修订四十五（Android 0.9.6 / 53）：R52 浮栏/长按选择真机反馈修复
+
+用户真机实测「长按选择弹出就消失、编辑器浮栏没看见」，指出 R52 三项未真正落地。
+
+### 一、根因（纠正 R52 错误结论）
+
+- R52 在 `MainActivity.onActionModeStarted()` 里 `mode.menu.clear()`。WebView 发现 ActionMode 菜单为空时会**立即 finish 并清空 DOM 选区**，浮栏来不及显示——这正是「弹出就消失」的直接原因。
+- R52 测试报告把该做法误记为「已验证的保留手柄路径」，本次明确纠正：`menu.clear()` 会摧毁选区，不可用于隐藏系统菜单。
+
+### 二、修复
+
+1. 删除 Activity 级 `onActionModeStarted { menu.clear() }`。
+2. 恢复 `EditorWebView` 子类，覆写 `startActionMode` / `startActionModeForChild`，用 `SelectionMenuCallback` 把菜单项逐个设 `isVisible=false`（保留条目数，WebView 不会结束 ActionMode，原生手柄存活），系统菜单不再绘制、浮栏承载动作。
+3. 编辑器 JS 新增 `onDomSelectionChange()` 监听 `document.selectionchange`：原生长按手柄由 WebView 驱动 DOM 选区、CM 的 `updateListener.selectionSet` 未必触发，兜底用 `view.posAtDOM()` 把 DOM 选区换算成 CM 位置再定位浮栏；DOM 选区清空但 CM state 非空时沿用 CM 选区。
+4. `selfCheckEdit` 增 `domBarVisible` 项：`createRange()` + `dispatchEvent(selectionchange)` 模拟原生手柄选区，先 `hideSelBar()` 再验证兜底路径能重新显示浮栏——自检不再只覆盖程序化 `setSelection`。
+
+### 三、验证
+
+- 门禁：`testDebugUnitTest` / `coverageGate` / `lintRelease` 0 error / `verifyReleaseBudget` 全绿。
+- 真机 `192.168.159.245:5555`（arm64-v8a）自检：`selfCheckEdit={"historyClean":true,"selection":true,"barVisible":true,"domBarVisible":true,"inserted":true,"undoDepth":true,"undo":true,"redo":true}`，八项全 true。
+- **验证边界**：adb `input motionevent` 为独立进程、退出即 cancel 触摸，长按住 0.7s 时选区仍在 100ms 后被清空（A/B：去掉抑制逻辑同样崩塌），属注入链路局限而非应用回归。原生手柄拖动、字符级边界与浮栏共存需用户真机目视最终确认；无外接键盘，物理 Ctrl+Z/Y 未逐键实测。
+
+### 四、产物
+
+- Android 0.9.5/52 → **0.9.6/53**；`android/dist/scratchpad-{arm64-v8a,x86_64}-release-0.9.6.apk`，upload key 签名指纹 `16e2b145…f0aa`。
+- 桌面版本不变（1.17.5）。
+
+## 修订四十六（Android 0.9.7 / 54）：编辑栏（Obsidian 同款）+ 长按选词自绘手柄
+
+用户指出 R52/R53 根本性理解错误：「编辑器编辑浮栏」是 Markdown 格式编辑工具栏（常驻可见），不是选区上下文浮栏；撤销/重做进命令面板等于不可用。
+
+### 一、落地内容
+
+1. **编辑栏 `#toolbar`**：底部固定、横向滚动；撤销/重做最左（深度置灰）+ H1/H2/H3 循环 + 加粗/斜体/删除线/高亮/行内代码（包裹对称取消）+ 引用/无序/有序（行级前缀整体取消）+ 待办三态 + 链接 + 代码块；覆盖层/查找条打开时隐藏。
+2. **命令面板移除 undo/redo**（用户拍板），`EditorActionsTest` 断言其不在动作表。
+3. **长按 2A 完全接管**：`user-select:none` 禁系统选择（实测不影响 IME 输入），长按 500ms 选词（`posAtCoords`→`wordAt`）、双击选词、自绘双手柄拖动字符级微调；`#selbar` 改四按钮操作条（复制/剪切/粘贴/全选）。
+4. **自检重写**：20 项逐动作断言，长按用合成 TouchEvent 保持按下模拟真实手指（此前「touchstart 后立即 touchend」会取消长按定时器，是自检模拟错误不是产品缺陷）。
+
+### 二、验证
+
+- Android **237 单测 / 0 失败**；`coverageGate` / `lintRelease` / `verifyReleaseBudget`（约 3.39 MB）全绿。
+- 真机 `192.168.159.245:5555`：`selfCheckEdit` 20 项全 true（toolbarVisible / undoBtnDisabled / boldInsert / undoBtnEnabledAfterEdit / toolbarUndo / boldWrap / boldUnwrap / h1 / h2 / h1Again / h1Cancel / ul / taskOnUl / taskOff / ulCancel / longPressWord / selbarFourButtons / handleDrag / handlesVisible）；`selfCheckFind` 回归全 true。
+- **截图实证**：编辑栏真实可见（键盘顶起随视口上移、不被遮挡）；`input tap` 真实点击 H2 → 正文变 `## hello`；点击撤销 → undoDepth 2→1 且 redo 按钮点亮（诊断日志 `tbState=false/false/d1` 实证）。
+- **验证边界**：手柄拖动手感与真实手指长按体验需用户目视确认（adb 合成长按仍不可靠）；`user-select:none` 对个别 ROM 系统 pill 的抑制程度待观察。
+
+### 三、产物
+
+- Android 0.9.6/53 → **0.9.7/54**；`android/dist/scratchpad-{arm64-v8a,x86_64}-release-0.9.7.apk`，upload key 签名指纹 `16e2b145…f0aa`。
+- 桌面版本不变（1.17.5）。
+
+
+## 修订四十七（Android 0.9.8 / 55）：编辑栏浮栏化 + 毛玻璃
+
+- 纯 CSS 视觉改造：`#toolbar` 四周 8px 留白悬浮、16px 圆角、`backdrop-filter: blur(16px) saturate(1.4)` 毛玻璃 + 高光描边 + 投影；`#selbar` 同步毛玻璃化；旧内核 `@supports not` 退化为 96% 不透明底。
+- 验证：237 单测 / 0 失败、门禁全绿；真机自检 20 项全 true；截图实证浮栏质感（键盘顶起随视口上移）；真实 tap 撤销按钮 → 正文 hello→空白。
+- 产物 `android/dist/scratchpad-{arm64-v8a,x86_64}-release-0.9.8.apk`，upload key 签名。桌面版本不变。
